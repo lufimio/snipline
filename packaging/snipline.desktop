@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Snipline
+Comment=Select, confirm, copy and save a screenshot
+Exec=snipline capture region
+Icon=camera-photo
+Terminal=false
+Categories=Utility;Graphics;
+StartupNotify=false
