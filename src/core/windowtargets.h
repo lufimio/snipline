@@ -14,4 +14,9 @@ QStringList windowTargetsAt(Compositor compositor, QPointF point,
                            const QByteArray &windows, const QByteArray &workspaces,
                            QString *error);
 QStringList niriPickedWindow(const QByteArray &json, const QVariantList &catalog, QString *error);
+// Display geometry only; these rectangles must never be used as screenshot
+// crops for isolated windows. Positions are global logical desktop coordinates.
+QVariantMap windowDisplayGeometry(Compositor compositor, const QVariantList &catalog,
+                                 const QByteArray &outputs, const QByteArray &windows,
+                                 const QByteArray &workspaces, QString *error);
 }

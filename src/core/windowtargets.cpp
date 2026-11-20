@@ -127,4 +127,80 @@ QStringList niriPickedWindow(const QByteArray &json, const QVariantList &catalog
   if (error) *error = "The picked window could not be matched to a retained capture handle. Pick again or use the list.";
   return {};
 }
+
+QVariantMap windowDisplayGeometry(Compositor compositor, const QVariantList &catalog,
+                                 const QByteArray &outputsJson, const QByteArray &windowsJson,
+                                 const QByteArray &workspacesJson, QString *error) {
+  if (error) error->clear();
+  auto fail = [error](const QString &message) -> QVariantMap {
+    if (error) *error = message;
+    return {};
+  };
+  QJsonParseError parse;
+  const auto windows = QJsonDocument::fromJson(windowsJson, &parse);
+  if (parse.error != QJsonParseError::NoError || !windows.isArray())
+    return fail("Cannot read window positions for highlighting.");
+  const auto outputs = QJsonDocument::fromJson(outputsJson, &parse);
+  if (parse.error != QJsonParseError::NoError)
+    return fail("Cannot read output positions for highlighting.");
+  QVariantMap result;
+  if (compositor == Compositor::Hyprland && outputs.isArray()) {
+    QSet<qint64> visible;
+    for (const auto &value : outputs.array()) {
+      const auto monitor = value.toObject();
+      if (monitor.value("disabled").toBool()) continue;
+      visible.insert(monitor.value("activeWorkspace").toObject().value("id").toInteger(-1));
+      const auto special = monitor.value("specialWorkspace").toObject().value("id").toInteger(0);
+      if (special) visible.insert(special);
+    }
+    for (const auto &value : windows.array()) {
+      const auto window = value.toObject();
+      if (!window.value("mapped").toBool() || window.value("hidden").toBool()) continue;
+      if (!window.value("pinned").toBool()
+          && !visible.contains(window.value("workspace").toObject().value("id").toInteger(-2))) continue;
+      QPointF position, size;
+      if (!pair(window.value("at"), &position) || !pair(window.value("size"), &size)
+          || size.x() <= 0 || size.y() <= 0) continue;
+      const auto key = address(window.value("address").toString());
+      if (key.isEmpty()) continue;
+      for (const auto &entry : catalog) {
+        const auto item = entry.toMap();
+        if (address(item.value("address").toString()) == key)
+          result.insert(item.value("id").toString(), QRectF(position, QSizeF(size.x(), size.y())));
+      }
+    }
+  } else if (compositor == Compositor::Niri && outputs.isObject()) {
+    const auto workspaces = QJsonDocument::fromJson(workspacesJson, &parse);
+    if (parse.error != QJsonParseError::NoError || !workspaces.isArray())
+      return fail("Cannot read niri workspace positions for highlighting.");
+    QMap<QString, QRectF> visible;
+    const auto outputMap = outputs.object();
+    for (const auto &value : workspaces.array()) {
+      const auto workspace = value.toObject();
+      if (!workspace.value("is_active").toBool()) continue;
+      const auto logical = outputMap.value(workspace.value("output").toString()).toObject().value("logical").toObject();
+      const QRectF rect(logical.value("x").toDouble(), logical.value("y").toDouble(),
+                        logical.value("width").toDouble(), logical.value("height").toDouble());
+      if (rect.isValid()) visible.insert(decimalId(workspace.value("id")), rect);
+    }
+    for (const auto &value : windows.array()) {
+      const auto window = value.toObject();
+      const auto output = visible.value(decimalId(window.value("workspace_id")));
+      if (!output.isValid()) continue;
+      const auto layout = window.value("layout").toObject();
+      QPointF position, size;
+      if (!pair(layout.value("tile_pos_in_workspace_view"), &position)
+          || !pair(layout.value("tile_size"), &size) || size.x() <= 0 || size.y() <= 0) continue;
+      const QRectF rect = QRectF(output.topLeft() + position, QSizeF(size.x(), size.y())).intersected(output);
+      if (!rect.isValid()) continue;
+      const auto key = decimalId(window.value("id"));
+      if (key.isEmpty()) continue;
+      for (const auto &entry : catalog) {
+        const auto item = entry.toMap();
+        if (item.value("identifier").toString() == key) result.insert(item.value("id").toString(), rect);
+      }
+    }
+  } else return fail("Window highlighting is unavailable for this compositor.");
+  return result;
+}
 }

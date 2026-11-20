@@ -16,6 +16,10 @@ public:
   virtual void start() = 0;
   virtual void startLive() = 0;
   virtual void captureLive(const QVector<Output> &expected) = 0;
+  virtual void captureRecording(const QVector<Output> &expected, const QString &outputName) {
+    Q_UNUSED(outputName)
+    captureLive(expected);
+  }
   virtual bool requiresWayland() const { return true; }
   virtual void verifyLayout(const QVector<Output> &expected) = 0;
   virtual void cancel() = 0;
@@ -33,6 +37,7 @@ public:
   void start() override;
   void startLive() override;
   void captureLive(const QVector<Output> &expected) override;
+  void captureRecording(const QVector<Output> &expected, const QString &outputName) override;
   void verifyLayout(const QVector<Output> &expected) override;
   void cancel() override;
 
@@ -45,6 +50,7 @@ private:
   Compositor m_compositor;
   QPointer<QProcess> m_process;
   QVector<Output> m_outputs;
+  QVector<Output> m_expected;
   QVector<Frame> m_frames;
 };
 

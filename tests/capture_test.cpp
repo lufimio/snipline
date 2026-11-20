@@ -128,12 +128,21 @@ private slots:
     {
         script("hyprctl", "case \"$2\" in\n"
                "monitors) printf '%s' '[{\"name\":\"test\",\"x\":0,\"y\":0,\"width\":2,\"height\":2,\"scale\":1,\"transform\":0,\"activeWorkspace\":{\"id\":1}}]' ;;\n"
-               "clients) printf '%s' '[{\"address\":\"0x10\",\"at\":[0,0],\"size\":[2,2],\"workspace\":{\"id\":1},\"mapped\":true}]' ;;\n"
+               "clients) printf '%s' '[{\"address\":\"0x10\",\"pid\":123,\"at\":[0,0],\"size\":[2,2],\"workspace\":{\"id\":1},\"mapped\":true}]' ;;\n"
                "*) exit 9 ;;\nesac\n");
         script("grim", "exit 99\n");
         WindowPicker picker;
         QSignalSpy picked(&picker, &WindowPicker::picked);
         QSignalSpy failed(&picker, &WindowPicker::failed);
+        QSignalSpy geometry(&picker, &WindowPicker::geometryChanged);
+        picker.refresh({QVariantMap{{"id", "exact"}, {"address", "10"}}});
+        QTRY_COMPARE(geometry.count(), 1);
+        QCOMPARE(picker.geometry().value("exact").toRectF(), QRectF(0, 0, 2, 2));
+        QCOMPARE(picker.metadata("exact").value("pid").toInt(), 123);
+        QCOMPARE(picked.count(), 0); // Metadata refresh is not a selection.
+        QCOMPARE(picker.hoveredAt({1, 1}), QString("exact"));
+        QVERIFY(picker.hoveredAt({3, 3}).isEmpty());
+        QCOMPARE(picked.count(), 0); // Cached hover does not start a pick job.
         picker.pick({1, 1}, {QVariantMap{{"id", "exact"}, {"address", "10"}}});
         QTRY_COMPARE(picked.count(), 1);
         QCOMPARE(failed.count(), 0);
@@ -142,6 +151,35 @@ private slots:
         picker.cancel();
         QTest::qWait(50);
         QCOMPARE(picked.count(), 1);
+    }
+    void recordingAcquiresOnlyOneOutputAndChecksWholeLayout()
+    {
+        script("hyprctl", "printf '%s' '["
+               "{\"name\":\"left\",\"x\":0,\"y\":0,\"width\":2,\"height\":2,\"scale\":1,\"transform\":0},"
+               "{\"name\":\"right\",\"x\":2,\"y\":0,\"width\":2,\"height\":2,\"scale\":1,\"transform\":0}]'\n");
+        script("grim", "[ \"$1\" = '-o' ] && [ \"$2\" = 'right' ] || exit 99\n"
+               "printf 'P3\\n2 2\\n255\\n0 0 255 0 0 255 0 0 255 0 0 255\\n'\n");
+        GrimCapture capture;
+        QSignalSpy ready(&capture, &CaptureBackend::ready);
+        QSignalSpy failed(&capture, &CaptureBackend::failed);
+        capture.startLive();
+        QTRY_COMPARE(ready.count(), 1);
+        QVector<Output> expected;
+        for (const auto &frame : qvariant_cast<QVector<Frame>>(ready[0][0]))
+            expected.push_back(frame.output);
+        for (int i = 0; i < 2; ++i) {
+            capture.captureRecording(expected, "right");
+            QTRY_COMPARE(ready.count(), i + 2);
+            const auto frames = qvariant_cast<QVector<Frame>>(ready.last()[0]);
+            QCOMPARE(frames.size(), 1);
+            QCOMPARE(frames[0].output.name, QString("right"));
+            QCOMPARE(frames[0].image.pixelColor(0, 0), QColor(Qt::blue));
+        }
+        QCOMPARE(failed.count(), 0);
+        validDiscovery(); // The other output disappearing must also invalidate the layout.
+        capture.captureRecording(expected, "right");
+        QTRY_COMPARE(failed.count(), 1);
+        QCOMPARE(ready.count(), 3);
     }
     void niriNativePickerUsesOpaqueNumericIdentity()
     {

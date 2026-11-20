@@ -5,10 +5,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 include(CTest)
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick QuickControls2 DBus)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick QuickControls2 DBus Svg)
 find_package(LayerShellQt REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(Wayland REQUIRED IMPORTED_TARGET wayland-client)
+pkg_check_modules(GStreamer REQUIRED IMPORTED_TARGET gstreamer-1.0>=1.20 gstreamer-app-1.0>=1.20)
+pkg_check_modules(PulseAudio REQUIRED IMPORTED_TARGET libpulse)
 pkg_check_modules(WaylandProtocols REQUIRED wayland-protocols>=1.41)
 pkg_check_modules(HyprlandProtocols REQUIRED hyprland-protocols>=0.8)
 pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
@@ -34,18 +36,63 @@ capture_protocol(hypr-mapping "${HYPRLAND_PROTOCOLS_DIR}/protocols/hyprland-topl
 
 add_library(snipline_core STATIC
     src/core/geometry.cpp src/core/selection.cpp
-    src/core/theme.cpp src/core/exporter.cpp src/core/outputs.cpp src/core/windowtargets.cpp)
+    src/core/theme.cpp src/core/exporter.cpp src/core/outputs.cpp src/core/windowtargets.cpp src/core/config.cpp
+    src/core/recordingsession.cpp)
 target_include_directories(snipline_core PUBLIC src)
 target_link_libraries(snipline_core PUBLIC Qt6::Core Qt6::Gui)
 target_compile_options(snipline_core PRIVATE -Wall -Wextra -Wpedantic)
 
-add_library(snipline_app STATIC src/capture.cpp src/controller.cpp src/windows.cpp src/surfacebarrier.cpp src/windowpicker.cpp)
+add_library(snipline_app STATIC src/capture.cpp src/controller.cpp src/windows.cpp src/surfacebarrier.cpp src/windowpicker.cpp src/notification.cpp src/recorder.cpp src/audiosources.cpp src/pulsetap.cpp)
 target_link_libraries(snipline_app PUBLIC snipline_core Qt6::Quick
-    Qt6::QuickControls2 Qt6::DBus LayerShellQt::Interface snipline_protocols)
+    Qt6::QuickControls2 Qt6::DBus LayerShellQt::Interface snipline_protocols PkgConfig::GStreamer PkgConfig::PulseAudio)
 target_compile_options(snipline_app PRIVATE -Wall -Wextra -Wpedantic)
 qt_add_executable(snipline src/main.cpp src/doctor.cpp)
-qt_add_resources(snipline ui PREFIX "/" FILES qml/Overlay.qml)
-target_link_libraries(snipline PRIVATE snipline_app PkgConfig::Wayland)
+set(SNIPLINE_QML
+    qml/Overlay.qml
+    qml/Glyph.qml
+    qml/IconButton.qml
+    qml/AudioSelector.qml
+)
+# QML is loaded with qrc:/qml/...; keep the SVG files under the same prefix.
+set(SNIPLINE_ICONS
+    qml/icons/audio-dark.svg
+    qml/icons/audio-light.svg
+    qml/icons/capture-dark.svg
+    qml/icons/capture-light.svg
+    qml/icons/check-dark.svg
+    qml/icons/check-light.svg
+    qml/icons/close-dark.svg
+    qml/icons/close-light.svg
+    qml/icons/chevron-dark.svg
+    qml/icons/chevron-light.svg
+    qml/icons/grip-dark.svg
+    qml/icons/grip-light.svg
+    qml/icons/image-dark.svg
+    qml/icons/image-light.svg
+    qml/icons/mic-dark.svg
+    qml/icons/mic-light.svg
+    qml/icons/monitor-dark.svg
+    qml/icons/monitor-light.svg
+    qml/icons/more-dark.svg
+    qml/icons/more-light.svg
+    qml/icons/ocr-dark.svg
+    qml/icons/ocr-light.svg
+    qml/icons/qr-dark.svg
+    qml/icons/qr-light.svg
+    qml/icons/record-dark.svg
+    qml/icons/record-light.svg
+    qml/icons/refresh-dark.svg
+    qml/icons/refresh-light.svg
+    qml/icons/region-dark.svg
+    qml/icons/region-light.svg
+    qml/icons/settings-dark.svg
+    qml/icons/settings-light.svg
+    qml/icons/window-dark.svg
+    qml/icons/window-light.svg
+)
+set(SNIPLINE_UI_RESOURCES ${SNIPLINE_QML} ${SNIPLINE_ICONS})
+qt_add_resources(snipline ui PREFIX "/" FILES ${SNIPLINE_UI_RESOURCES})
+target_link_libraries(snipline PRIVATE snipline_app PkgConfig::Wayland Qt6::Svg)
 target_compile_options(snipline PRIVATE -Wall -Wextra -Wpedantic)
 
 if(BUILD_TESTING)
@@ -53,13 +100,25 @@ if(BUILD_TESTING)
     qt_add_executable(snipline_tests tests/core_test.cpp)
     target_link_libraries(snipline_tests PRIVATE snipline_core Qt6::Test)
     add_test(NAME core COMMAND snipline_tests)
+    qt_add_executable(snipline_settings_tests tests/settings_test.cpp)
+    target_link_libraries(snipline_settings_tests PRIVATE snipline_app Qt6::Test)
+    add_test(NAME settings COMMAND snipline_settings_tests)
+    qt_add_executable(snipline_recording_tests tests/recording_test.cpp)
+    target_link_libraries(snipline_recording_tests PRIVATE snipline_app Qt6::Test)
+    add_test(NAME recording COMMAND snipline_recording_tests)
+    qt_add_executable(snipline_audio_tests tests/audio_test.cpp)
+    target_link_libraries(snipline_audio_tests PRIVATE snipline_app Qt6::Test)
+    add_test(NAME audio COMMAND snipline_audio_tests)
+    qt_add_executable(snipline_pulse_tests tests/pulse_test.cpp)
+    target_link_libraries(snipline_pulse_tests PRIVATE snipline_app Qt6::Test)
+    add_test(NAME isolated_audio COMMAND snipline_pulse_tests)
     qt_add_executable(snipline_target_tests tests/windowtargets_test.cpp)
     target_link_libraries(snipline_target_tests PRIVATE snipline_core Qt6::Test)
     add_test(NAME window_targets COMMAND snipline_target_tests)
     set_tests_properties(core PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     qt_add_executable(snipline_ui_tests tests/ui_test.cpp)
-    qt_add_resources(snipline_ui_tests test_ui PREFIX "/" FILES qml/Overlay.qml)
-    target_link_libraries(snipline_ui_tests PRIVATE snipline_app Qt6::Test)
+    qt_add_resources(snipline_ui_tests test_ui PREFIX "/" FILES ${SNIPLINE_UI_RESOURCES})
+    target_link_libraries(snipline_ui_tests PRIVATE snipline_app Qt6::Test Qt6::Svg)
     add_test(NAME ui COMMAND snipline_ui_tests)
     set_tests_properties(ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent")
     qt_add_executable(snipline_capture_tests tests/capture_test.cpp)
@@ -81,6 +140,7 @@ endif()
 
 install(TARGETS snipline RUNTIME DESTINATION bin)
 install(FILES themes/default.json DESTINATION share/snipline/themes)
+install(FILES config.example.json DESTINATION share/snipline)
 install(FILES packaging/snipline.desktop DESTINATION share/applications)
 install(FILES
     protocols/wlr-foreign-toplevel-management-unstable-v1.xml

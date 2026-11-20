@@ -92,6 +92,7 @@ void GrimCapture::start() {
   cancel();
   discover([this](QVector<Output> outputs) {
     m_outputs = std::move(outputs);
+    m_expected = m_outputs;
     nextFrame();
   });
 }
@@ -113,14 +114,30 @@ void GrimCapture::captureLive(const QVector<Output> &expected) {
       return;
     }
     m_outputs = std::move(outputs);
+    m_expected = m_outputs;
     nextFrame(); // Also verifies the layout after the final frame.
+  });
+}
+
+void GrimCapture::captureRecording(const QVector<Output> &expected, const QString &outputName) {
+  cancel();
+  discover([this, expected, outputName](QVector<Output> outputs) {
+    if (outputs != expected) {
+      emit failed("Output layout changed during recording.");
+      return;
+    }
+    m_expected = expected;
+    for (const auto &output : outputs)
+      if (output.name == outputName) m_outputs.push_back(output);
+    if (m_outputs.size() != 1) { emit failed("Recording output is unavailable."); return; }
+    nextFrame();
   });
 }
 
 void GrimCapture::nextFrame() {
   if (m_frames.size() == m_outputs.size()) {
     discover([this](QVector<Output> outputs) {
-      if (outputs != m_outputs) {
+      if (outputs != m_expected) {
         cancel();
         emit failed(
             QStringLiteral("Output layout changed. Start a new selection."));
@@ -188,6 +205,7 @@ void GrimCapture::cancel() {
   }
   m_frames.clear();
   m_outputs.clear();
+  m_expected.clear();
 }
 
 } // namespace snip

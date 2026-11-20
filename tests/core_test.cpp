@@ -22,7 +22,10 @@ private slots:
     void selectionDrags();
     void selectionResize();
     void themesAreTransactional();
+    void selectionDimmingThemeTokens();
     void exportIsUnique();
+    void exportFilenameTemplates();
+    void filenameDateTimeFormats();
     void exportFailures();
     void parseHyprland();
     void parseNiri();
@@ -128,6 +131,21 @@ void CoreTest::themesAreTransactional()
     QCOMPARE(theme.tokens(), valid);
 }
 
+void CoreTest::selectionDimmingThemeTokens()
+{
+    Theme theme;
+    QString error;
+    QVERIFY(theme.load(R"({"windowDimColor":"#334455","windowDimOpacity":0.2,"monitorDimOpacity":0.3})", &error));
+    const auto valid = theme.tokens();
+    QCOMPARE(valid.value("windowDimOpacity").toDouble(), 0.2);
+    QCOMPARE(valid.value("monitorDimOpacity").toDouble(), 0.3);
+    for (const auto bad : {R"({"windowDimOpacity":1.01})", R"({"monitorDimOpacity":-0.1})",
+                           R"({"windowDimColor":"invalid"})"}) {
+        QVERIFY(!theme.load(bad, &error));
+        QCOMPARE(theme.tokens(), valid);
+    }
+}
+
 void CoreTest::exportIsUnique()
 {
     QTemporaryDir directory;
@@ -155,6 +173,59 @@ void CoreTest::exportFailures()
     obstruction.close();
     QVERIFY(!saveImage(image, obstruction.fileName() + "/child").error.isEmpty());
     QCOMPARE(QDir(directory.path()).entryList(QDir::Files).size(), 1);
+}
+
+void CoreTest::exportFilenameTemplates()
+{
+    QTemporaryDir directory;
+    const auto image = solid({"a", {0, 0, 2, 2}, 1}, Qt::red).image;
+    const auto first = saveImage(image, directory.path(), "png", "My screenshot");
+    QVERIFY2(first.error.isEmpty(), qPrintable(first.error));
+    QCOMPARE(first.path, directory.filePath("My screenshot.png"));
+    const auto second = saveImage(image, directory.path(), "png", "My screenshot");
+    QVERIFY(second.error.isEmpty());
+    QCOMPARE(second.path, directory.filePath("My screenshot_1.png"));
+    QCOMPARE(QImage(first.path), image);
+    const auto expanded = saveImage(image, directory.path(), "png",
+                                   "{date}_{time}_{timestamp}_{uuid}");
+    QVERIFY2(expanded.error.isEmpty(), qPrintable(expanded.error));
+    const QRegularExpression pattern(
+        R"(^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3}_[0-9a-f]{32}\.png$)");
+    QVERIFY(pattern.match(QFileInfo(expanded.path).fileName()).hasMatch());
+    for (const auto &bad : QStringList{"", " ", ".", "..", "../outside", "/absolute",
+             "sub\\file", "line\nbreak", "{unknown}", "unclosed{", QString(221, 'a')}) {
+        QVERIFY(!saveImage(image, directory.path(), "png", bad).error.isEmpty());
+    }
+    QCOMPARE(QDir(directory.path()).entryList(QDir::Files).size(), 3);
+}
+
+void CoreTest::filenameDateTimeFormats()
+{
+    const auto now = QDateTime::fromString("2026-11-20T14:05:09.007+05:30", Qt::ISODateWithMs);
+    QVERIFY(now.isValid());
+    QString error;
+    for (const auto &pattern : QStringList{
+             "yyyyMMdd_HHmmss_zzz", "d dd ddd dddd M MM MMM MMMM yy yyyy",
+             "h hh H HH m mm s ss z zzz AP ap aP Ap", "t tt ttt tttt",
+             "yyyy-MM-dd'T'HH:mm:ss.zzzttt", "'Taken on' dddd 'at' hh:mm AP",
+             "'o''clock' HH", "'{literal}' yyyy", "yyyy'}'MM'{'dd",
+             "'{uuid}' yyyy", "''yyyy''", "'{{}}' yyyy"}) {
+        QCOMPARE(formatFilenameTemplate("Shot_{datetime:" + pattern + "}", now, &error),
+                 "Shot_" + now.toString(pattern));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+    }
+    QCOMPARE(formatFilenameTemplate("{datetime:yyyy}_{datetime:MM}_{datetime:dd}", now),
+             QString("2026_11_20"));
+    QCOMPARE(formatFilenameTemplate("{{shot}}_{datetime:yyyy}", now), QString("{shot}_2026"));
+    QCOMPARE(formatFilenameTemplate("{date}_{time}_{timestamp}", now),
+             QString("2026-11-20_14-05-09_2026-11-20_14-05-09-007"));
+    for (const auto &bad : QStringList{"{datetime:}", "{datetime:yyyy",
+             "{datetime:'unclosed}", "{datetime:yyyy/MM/dd}", "{datetime:'../'yyyy}",
+             "{datetime:'\n'yyyy}", "{datetime:'" + QString(221, 'x') + "'}",
+             "unmatched}", "{other:yyyy}"}) {
+        QVERIFY(formatFilenameTemplate(bad, now, &error).isEmpty());
+        QVERIFY2(!error.isEmpty(), qPrintable(bad));
+    }
 }
 
 void CoreTest::parseHyprland()

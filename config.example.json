@@ -1,0 +1,27 @@
+{
+  "directory": "~/Pictures/Snipline",
+  "format": "png",
+  "filenameTemplate": "Snipline_{datetime:yyyy-MM-dd_HH-mm-ss-zzz}_{uuid}",
+  "target": "region",
+  "live": false,
+  "clipboard": true,
+  "notifications": true,
+  "notificationTimeout": 5000,
+  "keybindings": {
+    "confirm": ["Return", "Enter"],
+    "cancel": ["Escape"],
+    "region": ["Ctrl+1"],
+    "monitor": ["Ctrl+2"],
+    "window": ["Ctrl+3"]
+  },
+  "recording": {
+    "format": "mp4",
+    "fps": 30,
+    "countdown": 3,
+    "maxDuration": 3600,
+    "systemAudio": false,
+    "microphone": false,
+    "systemAudioDevice": "@DEFAULT_MONITOR@",
+    "microphoneDevice": ""
+  }
+}

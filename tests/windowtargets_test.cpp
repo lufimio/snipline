@@ -92,6 +92,30 @@ private slots:
     QVERIFY(niriPickedWindow("{", windows, &error).isEmpty());
     QVERIFY(!error.isEmpty());
   }
+  void hyprlandHighlightUsesLogicalGeometryAndVisibility()
+  {
+    QString error;
+    auto bottom = window("0x10000000a"), top = window("0x20000000a");
+    top["workspace"] = QJsonObject{{"id", 2}};
+    const auto geometry = windowDisplayGeometry(Compositor::Hyprland, catalog, monitors,
+        QJsonDocument(QJsonArray{bottom, top}).toJson(), {}, &error);
+    QVERIFY(error.isEmpty());
+    QCOMPARE(geometry.value("bottom").toRectF(), QRectF(-50, -50, 100, 100));
+    QVERIFY(!geometry.contains("top"));
+  }
+  void niriHighlightAddsOutputOriginAndClipsScrolledTiles()
+  {
+    const QVariantList catalog{QVariantMap{{"id", "exact"}, {"identifier", "42"}}};
+    const QByteArray outputs = R"({"DP-1":{"logical":{"x":-400,"y":100,"width":400,"height":300}}})";
+    const QByteArray workspaces = R"([{"id":7,"output":"DP-1","is_active":true}])";
+    const QByteArray windows = R"([{"id":42,"workspace_id":7,"layout":{"tile_pos_in_workspace_view":[-20,50],"tile_size":[100,80]}}])";
+    QString error;
+    const auto geometry = windowDisplayGeometry(Compositor::Niri, catalog, outputs, windows, workspaces, &error);
+    QVERIFY(error.isEmpty());
+    QCOMPARE(geometry.value("exact").toRectF(), QRectF(-400, 150, 80, 80));
+    QVERIFY(windowDisplayGeometry(Compositor::Niri, catalog, outputs, windows,
+        R"([{"id":7,"output":"DP-1","is_active":false}])", &error).isEmpty());
+  }
 };
 
 QTEST_GUILESS_MAIN(WindowTargetsTest)

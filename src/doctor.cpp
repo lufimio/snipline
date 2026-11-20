@@ -101,11 +101,12 @@ int doctor() {
   const auto compositor = currentCompositor();
   QJsonObject dependencies;
   for (const auto *program : {"grim", "hyprctl", "niri", "gst-inspect-1.0",
-                              "tesseract", "satty", "grabit"})
+                              "tesseract", "satty", "grabit", "ffmpeg", "ffprobe", "pactl"})
     dependencies[program] = !QStandardPaths::findExecutable(program).isEmpty();
   QJsonObject codecs;
   for (const auto *element :
-       {"pipewiresrc", "audiomixer", "x264enc", "vp8enc", "opusenc",
+        {"pipewiresrc", "appsrc", "pulsesrc", "audiomixer", "x264enc", "h264parse",
+         "mp4mux", "vp8enc", "webmmux", "opusenc", "avenc_aac",
         "vaapih264enc", "vah264enc", "nvh264enc"})
     codecs[element] = hasElement(element);
   QJsonArray formats;
@@ -155,7 +156,11 @@ int doctor() {
                                    {"live", true},
                                    {"window", true},
                                   {"portal", false},
-                                  {"recording", false}}},
+                                   {"recording", true}}},
+       {"recording", QJsonObject{{"source", "repeated native capture; no desktop fallback for windows"},
+                                 {"crossOutput", false}, {"hardwareEncoding", false},
+                                 {"formats", QJsonArray{"mp4", "webm", "gif"}},
+                                 {"audio", "PulseAudio/PipeWire-Pulse; separate system/microphone sources"}}},
       {"note", "Protocol advertisement and installed encoders are not "
                "end-to-end validation. No pixels or streams were requested."}};
   QTextStream(stdout) << QJsonDocument(report).toJson(QJsonDocument::Indented);
