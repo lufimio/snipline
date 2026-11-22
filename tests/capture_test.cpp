@@ -26,6 +26,57 @@ class CaptureTest : public QObject {
         script("hyprctl", "printf '%s' '[{\"name\":\"test\",\"x\":0,\"y\":0,\"width\":2,\"height\":2,\"scale\":1,\"transform\":0}]'\n");
     }
 private slots:
+    void crossOutputAcquisition_data()
+    {
+        QTest::addColumn<QString>("desktop");
+        QTest::newRow("hyprland") << QString("Hyprland");
+        QTest::newRow("niri") << QString("niri");
+    }
+    void crossOutputAcquisition()
+    {
+        QFETCH(QString, desktop);
+        qputenv("XDG_CURRENT_DESKTOP", desktop.toUtf8());
+        const auto restore = qScopeGuard([] { qputenv("XDG_CURRENT_DESKTOP", "Hyprland"); });
+        if (desktop == "Hyprland")
+            script("hyprctl", "printf '%s' '["
+                   "{\"name\":\"left\",\"x\":-2,\"y\":0,\"width\":3,\"height\":3,\"scale\":1.5,\"transform\":0},"
+                   "{\"name\":\"right\",\"x\":0,\"y\":0,\"width\":4,\"height\":6,\"scale\":2,\"transform\":1}]'\n");
+        else
+            script("niri", "printf '%s' '{"
+                   "\"left\":{\"logical\":{\"x\":-2,\"y\":0,\"width\":2,\"height\":2,\"scale\":1.5,\"transform\":\"normal\"}},"
+                   "\"right\":{\"logical\":{\"x\":0,\"y\":0,\"width\":3,\"height\":2,\"scale\":2,\"transform\":\"90\"}}}'\n");
+        const QByteArray pixels =
+            "[ \"$1\" = '-o' ] && [ \"$3\" = '-s' ] && [ \"$5\" = '-t' ] && [ \"$6\" = 'ppm' ] || exit 99\n"
+            "case \"$2\" in\n"
+            "left) [ \"$4\" = '1.5' ] || exit 98; printf 'P3\\n3 3\\n255\\n'; count=9; color='255 0 0 ' ;;\n"
+            "right) [ \"$4\" = '2' ] || exit 98; printf 'P3\\n6 4\\n255\\n'; count=24; color='0 0 255 ' ;;\n"
+            "*) exit 97 ;; esac\n"
+            "while [ \"$count\" -gt 0 ]; do printf '%s' \"$color\"; count=$((count - 1)); done\n";
+        script("grim", pixels);
+        GrimCapture capture;
+        QSignalSpy ready(&capture, &CaptureBackend::ready);
+        QSignalSpy failed(&capture, &CaptureBackend::failed);
+        capture.start();
+        QTRY_COMPARE(ready.count(), 1);
+        QCOMPARE(failed.count(), 0);
+        const auto frozen = qvariant_cast<QVector<Frame>>(ready.last()[0]);
+        QCOMPARE(frozen.size(), 2);
+        const auto image = compose(frozen, {-1, 0, 2, 2});
+        QVERIFY2(image.error.isEmpty(), qPrintable(image.error));
+        QCOMPARE(image.image.size(), QSize(4, 4));
+        QCOMPARE(image.image.pixelColor(1, 3), QColor(Qt::red));
+        QCOMPARE(image.image.pixelColor(2, 0), QColor(Qt::blue));
+        QVector<Output> expected;
+        for (const auto &frame : frozen) expected.push_back(frame.output);
+        capture.captureLive(expected);
+        QTRY_COMPARE(ready.count(), 2);
+        QCOMPARE(qvariant_cast<QVector<Frame>>(ready.last()[0]).size(), 2);
+        // A failed output must not publish a partial cross-monitor screenshot.
+        script("grim", "[ \"$2\" != right ] || exit 1\n" + pixels);
+        capture.captureLive(expected);
+        QTRY_COMPARE(failed.count(), 1);
+        QCOMPARE(ready.count(), 2);
+    }
     void initTestCase()
     {
         QVERIFY(m_dir.isValid());

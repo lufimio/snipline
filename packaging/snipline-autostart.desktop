@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Snipline background service
+Comment=Optional Snipline tray and background capture service
+Exec=snipline daemon --tray
+TryExec=snipline
+Icon=camera-photo
+Terminal=false
+StartupNotify=false

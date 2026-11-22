@@ -1,7 +1,8 @@
 # Snipline
 
 A standalone C++20 / Qt Quick screenshot and recording selector for Wayland, being built from
-[`plan.md`](plan.md). **Early prototype, not a completed Milestone 1 release.**
+[`plan.md`](plan.md). Native workflows are implemented; compositor certification
+and the remaining fallback limitations are listed below.
 
 ## Implemented
 
@@ -16,12 +17,16 @@ A standalone C++20 / Qt Quick screenshot and recording selector for Wayland, bei
 - A compositor-independent window list and isolated frozen-window buffers. Hyprland uses
   native toplevel-export with retained wlr handles; the standard ext protocol
   path (including compatible niri versions) uses stable identifiers and `grim -T`.
-- Live overlays are transparent to the desktop. Confirmation hides all selector
-  surfaces/popups, waits for a `wl_display.sync` acknowledgement on **Qt's own
-  connection**, then revalidates the layout and acquires fresh pixels. No delay
-  or second-connection roundtrip is used as a substitute for that barrier.
+- Live overlays are transparent to the desktop. Confirmation renders all Quick
+  selector surfaces/popups fully transparent, waits for the updated buffers to
+  be submitted and for `wl_display.sync` on **Qt's own connection**, then
+  revalidates the layout and acquires fresh pixels. Surfaces remain mapped until
+  acquisition completes, avoiding toolbar capture during compositor close
+  animations. No fixed sleep or second-connection roundtrip replaces the barrier.
 - Mixed-density composition at the highest selected scale, including negative
   output positions and transparent desktop gaps.
+- Independent per-output QML contexts; automated two-screen live/frozen tests
+  cover cross-output drags in both directions and 1.25×/2× density.
 - Atomic PNG/JPEG/WebP export, unique filenames and owner-only file permissions.
 - Clipboard copying, basic desktop notifications and single-instance D-Bus control.
 - Validated, data-only JSON theme tokens.
@@ -39,11 +44,36 @@ A standalone C++20 / Qt Quick screenshot and recording selector for Wayland, bei
 - Explicit file uploads through libcurl, custom `.sxcu` destinations and Google
   Lens handoff, with cancellable background transfers and no extra confirmation dialogs.
 
-**Not yet implemented:** portal fallback, cross-output recording, generic editor-output
-tracking, history, tray or autostart. Native capture depends on the installed
+**Remaining limitations:** portal fallback, cross-output recording and generic
+editor-output tracking. Native capture depends on the installed
 `grim` and compositor supporting a compatible protocol. Hyprland screenshots
 have been manually tested by the user; **niri end-to-end support is not
 established** by the IPC parser. See the [compatibility matrix](docs/compatibility.md).
+
+Before treating this as release-ready, run the
+[manual acceptance checklist](docs/manual-testing.md), which lists known gaps
+separately from implemented features needing desktop validation.
+
+## Background service and optional desktop integration
+
+Snipline starts on demand and stays resident to retain clipboard ownership and
+notification actions. `snipline daemon` starts it without selecting/capturing.
+Use `snipline daemon --tray` for the optional tray icon, with capture, recognition,
+recording controls, upload cancellation and a Recent files menu. A desktop tray
+host is required; CLI operation remains available without one. Tray mode is a
+startup option: quit/restart the resident to change it.
+
+`snipline recent` prints at most 32 recent successful saves as JSON (path, kind
+and UTC timestamp). Metadata is memory-only and deduplicated; restarting the
+resident forgets it. It contains no images, OCR payloads, upload URLs or editor
+commands. Locked sessions do not expose it. `snipline forget` or the tray's
+**Forget recent files** clears metadata, never the saved files. Missing files are
+disabled in the tray.
+
+Optional startup and Hyprland/niri bindings are documented in
+[`packaging/bindings.md`](packaging/bindings.md). The package ships an autostart
+template under `/usr/share/snipline/`; it is **not enabled automatically**.
+No compositor configuration is changed.
 
 ## Configuration
 
@@ -72,7 +102,7 @@ Escape hides these controls; Discard is explicit.
 The recording arrow chooses saving, opening the folder/video, or editing **after
 the recording is successfully saved**. The selected action is applied by
 **Finish recording**; there is no separate result-action button.
-Configure the editor command in Session settings or `screenshots.editor` /
+Configure the editor command using `screenshots.editor` /
 `recording.editor` in JSON. For example, `"editor": "losslesscut {}"` replaces
 `{}` with the saved filename; `"editor": "satty --filename -"` connects the saved
 file's contents directly to stdin. No filename is appended when `{}` is absent.

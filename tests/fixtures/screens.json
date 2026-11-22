@@ -1,0 +1,7 @@
+{
+  "windowFrameMargins": false,
+  "screens": [
+    {"name": "left", "x": -640, "y": -120, "width": 640, "height": 480, "dpr": 1.25},
+    {"name": "right", "x": 0, "y": 0, "width": 640, "height": 480, "dpr": 2}
+  ]
+}

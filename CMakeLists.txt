@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 include(CTest)
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick QuickControls2 DBus Svg)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Quick QuickControls2 DBus Svg)
 find_package(LayerShellQt REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(CURL REQUIRED)
@@ -58,7 +58,7 @@ add_dependencies(snipline_app snipline_encoder_probe snipline_recognition_worker
 target_link_libraries(snipline_app PUBLIC CURL::libcurl snipline_core Qt6::Quick
     Qt6::QuickControls2 Qt6::DBus LayerShellQt::Interface snipline_protocols PkgConfig::GStreamer PkgConfig::PulseAudio)
 target_compile_options(snipline_app PRIVATE -Wall -Wextra -Wpedantic)
-qt_add_executable(snipline src/main.cpp src/doctor.cpp)
+qt_add_executable(snipline src/main.cpp src/doctor.cpp src/desktop.cpp)
 target_compile_definitions(snipline PRIVATE SNIPLINE_VERSION="${PROJECT_VERSION}")
 set(SNIPLINE_QML
     qml/Overlay.qml
@@ -113,7 +113,7 @@ list(APPEND SNIPLINE_UI_RESOURCES
     qml/icons/lens-light.svg qml/icons/lens-dark.svg
     qml/icons/upload-light.svg qml/icons/upload-dark.svg)
 qt_add_resources(snipline ui PREFIX "/" FILES ${SNIPLINE_UI_RESOURCES})
-target_link_libraries(snipline PRIVATE snipline_app PkgConfig::Wayland Qt6::Svg)
+target_link_libraries(snipline PRIVATE snipline_app PkgConfig::Wayland Qt6::Svg Qt6::Widgets)
 target_compile_options(snipline PRIVATE -Wall -Wextra -Wpedantic)
 
 if(BUILD_TESTING)
@@ -153,6 +153,9 @@ if(BUILD_TESTING)
     qt_add_resources(snipline_ui_tests test_ui PREFIX "/" FILES ${SNIPLINE_UI_RESOURCES})
     target_link_libraries(snipline_ui_tests PRIVATE snipline_app Qt6::Test Qt6::Svg PkgConfig::ZXing)
     add_test(NAME ui COMMAND snipline_ui_tests)
+    add_test(NAME cross_monitor COMMAND snipline_ui_tests crossMonitorScreenshots)
+    set_tests_properties(cross_monitor PROPERTIES ENVIRONMENT
+        "QT_QPA_PLATFORM=offscreen:configfile=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/screens.json;QT_QUICK_BACKEND=software;DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent")
     set_tests_properties(ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent")
     qt_add_executable(snipline_capture_tests tests/capture_test.cpp)
     target_link_libraries(snipline_capture_tests PRIVATE snipline_app Qt6::Test)
@@ -179,6 +182,7 @@ install(FILES LICENSE DESTINATION share/licenses/snipline)
 install(FILES themes/default.json DESTINATION share/snipline/themes)
 install(FILES config.example.json DESTINATION share/snipline)
 install(FILES packaging/snipline.desktop DESTINATION share/applications)
+install(FILES packaging/snipline-autostart.desktop packaging/bindings.md DESTINATION share/snipline)
 install(FILES
     protocols/wlr-foreign-toplevel-management-unstable-v1.xml
     "${WAYLAND_PROTOCOLS_DIR}/staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1.xml"

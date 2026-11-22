@@ -13,6 +13,7 @@
 #include "recognition.h"
 #include "notification.h"
 #include "uploader.h"
+#include <QJsonArray>
 #include <QDBusObjectPath>
 #include <QQuickImageProvider>
 #include <QQuickView>
@@ -201,11 +202,15 @@ public slots:
   Q_SCRIPTABLE QString TogglePause();
   Q_SCRIPTABLE QString Stop();
   Q_SCRIPTABLE QString Status() const;
+  Q_SCRIPTABLE QString Recent() const;
+  Q_SCRIPTABLE void ClearRecent();
+  void openRecent(const QString &filename);
   void SessionLocked();
   void ScreenSaverActive(bool active);
   void SessionPropertiesChanged(QString interface, QVariantMap changed, QStringList invalidated);
 signals:
   void changed();
+  void fileSaved(const QString &filename, bool image);
 
 private:
   void showFrames(QVector<Frame> frames);
@@ -222,6 +227,7 @@ private:
   void restartSelection(const QString &mode, bool live);
   void refreshFrozenFrames(QVector<Frame> frames);
   void restoreTransitionSurfaces();
+  void prepareCleanFrame();
   void save(const QImage &image);
   void recognitionFinished(bool success);
   QUrl codeUrl(int index) const;
@@ -257,6 +263,7 @@ private:
   bool m_recording = false, m_recordAcquiring = false, m_encoderStarted = false;
   bool m_quitAfterRecording = false;
   bool m_sessionLocked = false;
+  QJsonArray m_recent;
   bool m_recordControls = false;
   QString m_captureDisposition = "capture", m_postRecordingAction;
   QString m_postUploadDestination, m_uploadEditor;

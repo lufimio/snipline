@@ -16,6 +16,8 @@
 #include <QMimeData>
 #include <QMimeDatabase>
 #include <QQmlContext>
+#include <QQmlComponent>
+#include <QDateTime>
 #include <QQmlEngine>
 #include <QScreen>
 #include <QQuickItem>
@@ -113,7 +115,7 @@ Controller::Controller(QString directory, QByteArray format, QString themePath,
       });
   m_transitionTimeout.setSingleShot(true);
   connect(&m_transitionTimeout, &QTimer::timeout, this, [this] {
-    fail("Timed out presenting a clean frame for frozen capture.");
+    fail("Timed out presenting a clean frame for capture.");
   });
   m_queryAudio = audio || m_capture->requiresWayland();
   m_audioTimer.setInterval(2000);
@@ -194,6 +196,7 @@ Controller::Controller(QString directory, QByteArray format, QString themePath,
     const auto editorCommand = m_config.videoEditor;
     const auto uploadDestination = m_postUploadDestination;
     release();
+    emit fileSaved(path, false);
     openResult(path, postAction, editorCommand, uploadDestination);
     qInfo().noquote() << body;
     if (postAction != "upload" && postAction != "lens" && postAction != "edit"
@@ -216,6 +219,14 @@ Controller::Controller(QString directory, QByteArray format, QString themePath,
       qWarning().noquote() << "Theme not applied; using defaults:" << error;
   }
   connect(&m_selection, &Selection::changed, this, &Controller::changed);
+  connect(this, &Controller::fileSaved, this, [this](const QString &filename, bool image) {
+    if (m_sessionLocked) return;
+    for (qsizetype i = m_recent.size(); i > 0; --i)
+      if (m_recent[i - 1].toObject()["path"].toString() == filename) m_recent.removeAt(i - 1);
+    m_recent.prepend(QJsonObject{{"path", filename}, {"kind", image ? "image" : "video"},
+                                {"savedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)}});
+    while (m_recent.size() > 32) m_recent.removeLast();
+  });
   m_geometryTimer.setInterval(200);
   connect(&m_geometryTimer, &QTimer::timeout, this, &Controller::refreshWindowGeometry);
   m_hoverTimer.setSingleShot(true);
@@ -377,6 +388,10 @@ void Controller::showFrames(QVector<Frame> frames) {
   m_provider = new FrameProvider;
   m_provider->frames = std::move(frames);
   m_engine->addImageProvider("frames", m_provider);
+  auto *shared = m_engine->rootContext();
+  shared->setContextProperty("controller", this);
+  shared->setContextProperty("selection", &m_selection);
+  shared->setContextProperty("theme", m_theme.tokens());
   QVector<Output> outputs;
   for (const auto &frame : m_provider->frames)
     outputs.push_back(frame.output);
@@ -396,6 +411,8 @@ void Controller::showFrames(QVector<Frame> frames) {
     view->setScreen(screen);
     view->setResizeMode(QQuickView::SizeRootObjectToView);
     view->resize(output.logical.size().toSize());
+    if (QGuiApplication::platformName() != "wayland")
+      view->setPosition(output.logical.topLeft().toPoint());
     view->setColor(Qt::transparent);
     if (QGuiApplication::platformName() == "wayland") {
       auto *layer = LayerShellQt::Window::get(view.get());
@@ -410,13 +427,16 @@ void Controller::showFrames(QVector<Frame> frames) {
     layer->setKeyboardInteractivity(
         LayerShellQt::Window::KeyboardInteractivityExclusive);
     }
-    auto *context = view->rootContext();
-    context->setContextProperty("controller", this);
-    context->setContextProperty("selection", &m_selection);
-    context->setContextProperty("theme", m_theme.tokens());
+    // QQuickView::rootContext() is shared when views use the same engine.
+    // Output-local properties must live in a child context, otherwise every
+    // overlay ends up using the last output's geometry and frozen image.
+    auto *context = new QQmlContext(shared, view.get());
     context->setContextProperty("outputIndex", index);
     context->setContextProperty("outputRect", output.logical);
-    view->setSource(QUrl("qrc:/qml/Overlay.qml"));
+    const QUrl source("qrc:/qml/Overlay.qml");
+    auto *component = new QQmlComponent(m_engine.get(), source, view.get());
+    auto *root = component->create(context);
+    view->setContent(source, component, root);
     if (view->status() == QQuickView::Error) {
       release();
       fail(QStringLiteral("Could not load the selection UI."));
@@ -653,6 +673,16 @@ void Controller::restartSelection(const QString &mode, bool live) {
   clearWindowHover();
   m_picker->cancel();
   m_geometryTimer.stop();
+  prepareCleanFrame();
+  emit changed();
+}
+
+void Controller::prepareCleanFrame() {
+  // Do not unmap before acquiring pixels: compositors may animate a layer
+  // surface's last opaque buffer after unmap, even after wl_display.sync.
+  // Submit a transparent buffer from every Quick surface first, and leave
+  // them mapped until capture has finished.
+  const auto phase = m_phase;
   const auto epoch = ++m_transitionEpoch;
   for (auto *window : QGuiApplication::topLevelWindows()) {
     auto *quick = qobject_cast<QQuickWindow *>(window);
@@ -664,12 +694,12 @@ void Controller::restartSelection(const QString &mode, bool live) {
     m_renderConnections.append(connect(quick, &QQuickWindow::afterSynchronizing, this, [synced] {
       synced->store(true, std::memory_order_release);
     }, Qt::DirectConnection));
-    m_renderConnections.append(connect(quick, &QQuickWindow::frameSwapped, this, [this, quick, epoch, synced] {
+    m_renderConnections.append(connect(quick, &QQuickWindow::frameSwapped, this, [this, quick, epoch, phase, synced] {
       // Gate at emission time, not delivery time: a queued swap for an older,
       // still-visible frame must never authorize acquiring desktop pixels.
       if (!synced->load(std::memory_order_acquire)) return;
-      QMetaObject::invokeMethod(this, [this, quick, epoch] {
-        if (epoch != m_transitionEpoch || m_phase != Phase::RefreshingFrozen) return;
+      QMetaObject::invokeMethod(this, [this, quick, epoch, phase] {
+        if (epoch != m_transitionEpoch || m_phase != phase) return;
         if (!m_pendingRenders.remove(quick)) return;
         if (!m_pendingRenders.isEmpty()) return;
         for (const auto &connection : m_renderConnections) disconnect(connection);
@@ -680,8 +710,11 @@ void Controller::restartSelection(const QString &mode, bool live) {
     }, Qt::DirectConnection));
     quick->requestUpdate();
   }
+  if (m_pendingRenders.isEmpty()) {
+    fail("No visible capture surface could present a clean frame.");
+    return;
+  }
   m_transitionTimeout.start(3000);
-  emit changed();
 }
 
 void Controller::restoreTransitionSurfaces() {
@@ -957,8 +990,7 @@ void Controller::confirm() {
   emit changed();
   if (m_live) {
     m_phase = Phase::Hiding;
-    hideOverlays();
-    m_barrier->start();
+    prepareCleanFrame();
   } else {
     m_phase = Phase::VerifyingFrozen;
     m_capture->verifyLayout(expectedLayout());
@@ -1044,6 +1076,7 @@ void Controller::save(const QImage &image) {
   const auto editorCommand = m_config.screenshotEditor;
   const auto uploadDestination = postAction == "lens" ? m_upload->resolveDestination(m_config.lensDestination) : m_postUploadDestination;
   m_lastCapture = saved.path;
+  emit fileSaved(saved.path, true);
   release();
   openResult(saved.path, postAction, editorCommand, uploadDestination);
   if (postAction != "upload" && postAction != "lens" && postAction != "edit"
@@ -1489,6 +1522,20 @@ QString Controller::showRecordingControls() {
     view->requestActivate();
   }
   return {};
+}
+QString Controller::Recent() const {
+  return QString::fromUtf8(QJsonDocument(m_sessionLocked ? QJsonArray{} : m_recent).toJson(QJsonDocument::Compact));
+}
+void Controller::ClearRecent() {
+  m_recent = {};
+  emit changed();
+}
+void Controller::openRecent(const QString &filename) {
+  if (m_sessionLocked || !QFileInfo(filename).isFile()) return;
+  bool known = false;
+  for (const auto &entry : m_recent)
+    if (entry.toObject()["path"].toString() == filename) known = true;
+  if (known) openResult(filename, "open");
 }
 QString Controller::Status() const {
   return QString::fromUtf8(QJsonDocument(QJsonObject{

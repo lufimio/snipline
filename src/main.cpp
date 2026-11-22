@@ -1,5 +1,7 @@
 #include "controller.h"
 #include "doctor.h"
+#include "desktop.h"
+#include <QApplication>
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -73,6 +75,7 @@ void configure(QCommandLineParser &parser, const QString &scope = {}, bool targe
   parser.addHelpOption();
   parser.addVersionOption();
   if (scope == "control" || scope == "doctor") return;
+  parser.addOption({"tray", "Show the optional system tray icon for this resident instance."});
   if (scope.isEmpty() || scope == "upload" || ((scope == "qr" || scope == "ocr" || scope == "lens") && !targetSpecified))
     parser.addOption({"file", "Use an existing file (upload) or image (qr/ocr/lens).", "path"});
   if (scope.isEmpty() || scope == "upload")
@@ -110,7 +113,7 @@ bool showCommandHelp(QStringList path) {
   const auto child = path.value(1);
   const QStringList targets{"region", "monitor", "window"};
   const QStringList controls{"pause", "resume", "stop", "discard", "status"};
-  const QStringList roots{"capture", "record", "qr", "ocr", "lens", "upload", "daemon", "cancel", "quit", "doctor"};
+  const QStringList roots{"capture", "record", "qr", "ocr", "lens", "upload", "daemon", "cancel", "quit", "doctor", "recent", "forget"};
   if (path.size() > 2 || (!root.isEmpty() && !roots.contains(root)) ||
         (!child.isEmpty() && (root != "capture" && root != "record" && root != "qr" && root != "ocr" && root != "lens")) ||
       (!child.isEmpty() && !targets.contains(child) && !(root == "record" && controls.contains(child))))
@@ -134,7 +137,9 @@ bool showCommandHelp(QStringList path) {
            "  upload --file <path>    Upload an existing file and copy its URL\n"
            "  lens [target]           Upload an image and search with Google Lens\n"
            "  lens --file <path>      Search with an existing local image\n"
-           "  daemon                  Start the resident instance without a selector\n"
+            "  daemon                  Start the resident instance without a selector\n"
+            "  recent                  Print bounded recent-file metadata as JSON\n"
+            "  forget                  Forget recent metadata without deleting files\n"
            "  cancel                  Cancel selection/recognition/upload or discard recording\n"
            "  quit                    Finalize recording and quit the resident instance\n"
            "  doctor                  Print JSON capability diagnostics; no capture\n"
@@ -209,7 +214,7 @@ bool showCommandHelp(QStringList path) {
              "Cancel from the progress notification, recording UI or 'snipline cancel'.\n\n";
   }
   QCommandLineParser options;
-  configure(options, recordingControl || root == "cancel" || root == "quit" ? "control" : root,
+  configure(options, recordingControl || root == "cancel" || root == "quit" || root == "recent" || root == "forget" ? "control" : root,
             !child.isEmpty());
   const auto nativeHelp = options.helpText();
   out << nativeHelp.mid(nativeHelp.indexOf("Options:\n"));
@@ -242,9 +247,9 @@ int main(int argc, char **argv) {
   const bool lens = command == "lens";
   const bool uploading = command == "upload";
   const bool selecting = command == "capture" || (command == "record" && !recordControl);
-  const bool control = command == "quit" || command == "cancel" || recordControl;
+  const bool control = command == "quit" || command == "cancel" || command == "recent" || command == "forget" || recordControl;
   if (!help && !parser.isSet("version")) {
-    if (!QStringList{"capture", "record", "qr", "ocr", "lens", "upload", "daemon", "cancel", "quit", "doctor"}.contains(root))
+    if (!QStringList{"capture", "record", "qr", "ocr", "lens", "upload", "daemon", "cancel", "quit", "doctor", "recent", "forget"}.contains(root))
       return fail("Unknown command. See 'snipline --help'.");
     if (args.size() > 2 || ((root != "capture" && root != "record" && !recognition && !lens) && args.size() > 1))
       return fail("Unexpected arguments. See 'snipline help " + root + "'.");
@@ -256,7 +261,7 @@ int main(int argc, char **argv) {
       return fail("--file is only valid with qr/ocr/lens/upload without a target.");
     if (uploading && !parser.isSet("file")) return fail("Upload requires --file <path>.");
     QCommandLineParser scoped;
-    configure(scoped, recordControl || command == "cancel" || command == "quit" ? "control" : command,
+    configure(scoped, control ? "control" : command,
               !action.isEmpty());
     if (!scoped.parse(arguments)) return fail(scoped.errorText());
   }
@@ -268,7 +273,7 @@ int main(int argc, char **argv) {
     app = std::make_unique<QCoreApplication>(argc, argv);
   else {
     QQuickStyle::setStyle("Basic");
-    app = std::make_unique<QGuiApplication>(argc, argv);
+    app = std::make_unique<QApplication>(argc, argv);
     QGuiApplication::setQuitOnLastWindowClosed(false);
     QGuiApplication::setDesktopFileName("snipline");
   }
@@ -322,12 +327,18 @@ int main(int argc, char **argv) {
     return fail("A session D-Bus is required for single-instance operation.");
   if (bus.interface()->isServiceRegistered(service).value()) {
     if (parser.isSet("directory") || parser.isSet("format") ||
-        parser.isSet("theme") || parser.isSet("config"))
+        parser.isSet("theme") || parser.isSet("config") || parser.isSet("tray"))
       return fail("An instance is running. Quit it before changing directory, "
-                  "format, theme, or config.");
+                  "format, theme, config, or tray mode.");
     if (command == "daemon")
       return 0;
     QDBusInterface remote(service, objectPath, service, bus);
+    if (command == "recent" || command == "forget") {
+      const auto reply = remote.call(command == "recent" ? "Recent" : "ClearRecent");
+      if (reply.type() == QDBusMessage::ErrorMessage) return fail(reply.errorMessage());
+      if (command == "recent") QTextStream(stdout) << reply.arguments().value(0).toString() << '\n';
+      return 0;
+    }
     if (uploading || lens) {
       const QDBusReply<QString> reply = uploading
           ? remote.call("Upload", recognitionFile, parser.value("service"))
@@ -370,6 +381,7 @@ int main(int argc, char **argv) {
     return reply.value().isEmpty() ? 0 : fail(reply.value());
   }
   if (control) {
+    if (command == "recent") { QTextStream(stdout) << "[]\n"; return 0; }
     if (command == "status") { QTextStream(stdout) << "{\"recording\":false,\"state\":\"Idle\"}\n"; return 0; }
     if (command == "toggle" || command == "stop") return fail("No running Snipline instance.");
     return 0;
@@ -391,6 +403,8 @@ int main(int argc, char **argv) {
                           QDBusConnection::ExportScriptableSlots) ||
       !bus.registerService(service))
     return fail("Could not register the single-instance service. Try again.");
+  std::unique_ptr<snip::DesktopIntegration> desktop;
+  if (parser.isSet("tray")) desktop = std::make_unique<snip::DesktopIntegration>(controller);
   if (uploading || lens) {
     const auto service = parser.value("service");
     QTimer::singleShot(0, &controller, [&controller, uploading, recognitionTarget, recognitionFile, recognitionLive, service] {

@@ -47,7 +47,7 @@ and is exercised with synthetic fixtures. This is not an end-to-end niri test.
 | Portal capture/PipeWire streams | Not implemented | Not implemented |
 | Native recording | Native repeated-capture path with software/optional hardware encoding; synthetic lifecycle/encoding tests, live desktop test pending | Same, requires compatible native capture protocols; live test pending |
 | Recording audio | PulseAudio/PipeWire-Pulse sources; synthetic mixer tests only | Same |
-| Notification actions under DMS/Noctalia | Not implemented | Not implemented |
+| Notification actions under DMS/Noctalia | Implemented/private-D-Bus tested; actual host unverified | Same |
 
 If `grim` cannot capture, the job reports an error. It does not fall back to an
 unrelated source, change compositor configuration, invoke a shell, or silently
@@ -62,7 +62,12 @@ save anything.
   protocol absence, closed windows, native capture failures and stable ext
   identifiers passed to `grim -T` without a shell.
 - Controller tests assert that live preparation acquires no pixels, confirmation
-  hides overlays before the barrier, and no acquisition occurs until it succeeds.
+  renders mapped overlays fully transparent before the barrier, and no
+  acquisition occurs until it succeeds. A rendered-image regression checks every
+  pixel (including toolbar/dimming/handles) has zero alpha before acquisition.
+  Merely hiding/unmapping the windows and synchronizing does not exclude a
+  compositor's close-animation snapshot, so live screenshots no longer use that
+  path. Real-session retesting is still required.
   Cancellation, a failed barrier, and a changed layout produce no saved file.
 - Live overlays are rendered offscreen to verify that the selected area contains
   no frozen image and is transparent. Final exports use the newly acquired frame.
@@ -198,7 +203,34 @@ No extra confirmation dialogs are used: only explicitly chosen Upload/Lens
 actions transfer data. Cancellation cannot undo data already accepted remotely.
 Full browser/compositor interaction still needs real-session manual checks.
 
+## Cross-monitor and desktop-integration regression coverage
+
+The two-screen Qt offscreen fixture covers negative output positions, 1.25×/2×
+scales, dragging across the boundary in either direction, distinct frozen
+background contexts, shared selection state, live surface hiding/barrier order,
+and saved image dimensions/pixels at the highest selected density. It caught and
+fixed a shared-engine QML context bug that made every overlay use the last
+output's coordinates/image index.
+
+Separate native-command fixtures exercise two-output Hyprland and niri discovery,
+fractional density and a rotated output, both frozen/live acquisitions, and
+rejection of partial captures if one output fails. Core tests cover transparent
+desktop gaps and already-display-oriented rotated image crops.
+
+These are deterministic regression tests, not a claim that pointer grabs,
+hotplug or mixed-DPI layer surfaces have been certified on both real compositors.
+Run `ctest --test-dir build -R 'cross_monitor|capture|core' --output-on-failure`.
+No compositor configuration or desktop state is modified by these fixtures.
+
+The optional tray has a private-D-Bus/offscreen startup/shutdown smoke test.
+Recent metadata is bounded, deduplicated, hidden while locked, and clearing it
+does not delete original files. Tray-host rendering and XDG autostart still need
+manual validation on the target desktop.
+
 ## Manual validation checklist
+
+Use [`manual-testing.md`](manual-testing.md) for the complete acceptance checklist,
+including current unfinished features and known public-service failures.
 
 Run for each compositor/version and record the version, output layout and result
 without attaching private screenshots:

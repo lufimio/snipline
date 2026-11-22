@@ -18,6 +18,7 @@ class CoreTest : public QObject {
 private slots:
     void mixedScale();
     void negativeAndRotated();
+    void crossMonitorExports();
     void gapsAndLimits();
     void selectionDrags();
     void selectionResize();
@@ -67,6 +68,35 @@ void CoreTest::negativeAndRotated()
     QCOMPARE(result.image.size(), QSize(60, 120));
     QCOMPARE(result.image.pixelColor(0, 0), QColor(Qt::red));
     QCOMPARE(result.image.pixelColor(59, 119), QColor(Qt::green));
+}
+
+void CoreTest::crossMonitorExports()
+{
+    // Two fractional-density outputs with a desktop gap, plus an unrelated
+    // higher-density output that must not inflate this export's pixel density.
+    auto left = solid({"left", {-80, -40, 80, 80}, 1.25}, Qt::red);
+    auto right = solid({"portrait", {20, -40, 60, 120}, 1.5, 1}, Qt::blue);
+    auto unrelated = solid({"other", {500, 0, 40, 40}, 3}, Qt::green);
+    const QRectF area(-40, -20, 100, 40);
+    const auto result = compose({left, right, unrelated}, area);
+    QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+    QCOMPARE(result.scale, 1.5);
+    QCOMPARE(result.image.size(), QSize(150, 60));
+    QCOMPARE(result.image.pixelColor(59, 59), QColor(Qt::red));
+    QCOMPARE(result.image.pixelColor(60, 0).alpha(), 0);
+    QCOMPARE(result.image.pixelColor(89, 59).alpha(), 0);
+    QCOMPARE(result.image.pixelColor(90, 0), QColor(Qt::blue));
+    QCOMPARE(result.image.pixelColor(149, 59), QColor(Qt::blue));
+    QTemporaryDir directory;
+    const auto path = directory.filePath("cross-monitor.png");
+    QVERIFY(result.image.save(path));
+    const QImage restored(path);
+    QCOMPARE(restored.size(), result.image.size());
+    QCOMPARE(restored.pixelColor(59, 59), QColor(Qt::red));
+    QCOMPARE(restored.pixelColor(75, 30).alpha(), 0);
+    QCOMPARE(restored.pixelColor(149, 59), QColor(Qt::blue));
+    right.image = {};
+    QVERIFY(!compose({left, right}, area).error.isEmpty());
 }
 
 void CoreTest::gapsAndLimits()

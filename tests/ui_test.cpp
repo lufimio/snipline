@@ -156,6 +156,139 @@ class UiTest : public QObject {
         return nullptr;
     }
 private slots:
+    void recentMetadataIsBoundedAndDoesNotOwnFiles()
+    {
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier);
+        Config config;
+        config.notifications = false;
+        controller.configure(config);
+        QFile original(directory.filePath("original.png"));
+        QVERIFY(original.open(QIODevice::WriteOnly));
+        original.write("original contents"); original.close();
+        for (int i = 0; i < 40; ++i)
+            emit controller.fileSaved(directory.filePath(QString::number(i) + ".png"), true);
+        auto entries = QJsonDocument::fromJson(controller.Recent().toUtf8()).array();
+        QCOMPARE(entries.size(), 32);
+        QCOMPARE(entries.first().toObject()["path"].toString(), directory.filePath("39.png"));
+        emit controller.fileSaved(original.fileName(), true);
+        emit controller.fileSaved(original.fileName(), true);
+        entries = QJsonDocument::fromJson(controller.Recent().toUtf8()).array();
+        QCOMPARE(entries.size(), 32);
+        QCOMPARE(entries.first().toObject()["path"].toString(), original.fileName());
+        controller.ClearRecent();
+        QCOMPARE(controller.Recent(), QString("[]"));
+        QVERIFY(original.open(QIODevice::ReadOnly));
+        QCOMPARE(original.readAll(), QByteArray("original contents"));
+        emit controller.fileSaved(original.fileName(), true);
+        controller.SessionLocked();
+        QCOMPARE(controller.Recent(), QString("[]"));
+        QVERIFY(original.exists());
+    }
+    void crossMonitorScreenshots()
+    {
+        if (QGuiApplication::screens().size() != 2)
+            QSKIP("Run the cross_monitor CTest fixture for two simulated outputs");
+        class MultiPixels final : public CaptureBackend {
+        public:
+            QVector<Output> outputs{
+                {"left", {-640, -120, 640, 480}, 1.25},
+                {"right", {0, 0, 640, 480}, 2}};
+            QVector<Output> expected;
+            int acquisitions = 0, verifications = 0;
+            bool requiresWayland() const override { return false; }
+            void start() override { finish(Qt::red, Qt::blue); }
+            void startLive() override { emit ready({{outputs[0], {}}, {outputs[1], {}}}); }
+            void captureLive(const QVector<Output> &layout) override { expected = layout; ++acquisitions; }
+            void verifyLayout(const QVector<Output> &layout) override {
+                expected = layout; ++verifications; emit layoutVerified();
+            }
+            void cancel() override {}
+            void finish(QColor left, QColor right) {
+                QVector<Frame> frames;
+                for (int i = 0; i < outputs.size(); ++i) {
+                    QImage image((outputs[i].logical.size() * outputs[i].scale).toSize(), QImage::Format_RGB32);
+                    image.fill(i == 0 ? left : right);
+                    frames.push_back({outputs[i], image});
+                }
+                emit ready(frames);
+            }
+        };
+        for (const bool live : {false, true}) {
+          for (const bool reverse : {false, true}) {
+            QTemporaryDir directory;
+            MultiPixels pixels;
+            FakeWindows windows;
+            FakeBarrier barrier;
+            Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier);
+            Config config;
+            config.notifications = false;
+            config.clipboard = false;
+            controller.configure(config);
+            QVERIFY(controller.CaptureWithMode("region", live).isEmpty());
+            QTest::qWait(50);
+            QQuickView *left = nullptr, *right = nullptr;
+            for (auto *window : QGuiApplication::topLevelWindows()) {
+                auto *view = qobject_cast<QQuickView *>(window);
+                if (!view || !view->isVisible()) continue;
+                const auto rect = qmlContext(view->rootObject())->contextProperty("outputRect").toRectF();
+                const int index = qmlContext(view->rootObject())->contextProperty("outputIndex").toInt();
+                QCOMPARE(rect, pixels.outputs[index].logical);
+                if (rect.x() < 0) left = view;
+                else right = view;
+            }
+            QVERIFY2(left && right, qPrintable("Multi-output selector: " + controller.error()
+                      + QString(" (%1 windows)").arg(QGuiApplication::topLevelWindows().size())));
+            QCOMPARE(left->screen()->name(), QString("left"));
+            QCOMPARE(right->screen()->name(), QString("right"));
+            auto *selection = qobject_cast<Selection *>(left->rootContext()->contextProperty("selection").value<QObject *>());
+            QVERIFY(selection);
+            QCOMPARE(right->rootContext()->contextProperty("selection").value<QObject *>(), selection);
+            // Wayland's implicit pointer grab keeps delivering coordinates to
+            // the pressed surface even after crossing onto a different output.
+            auto *origin = reverse ? right : left;
+            QTest::mousePress(origin, Qt::LeftButton, Qt::NoModifier,
+                              reverse ? QPoint(80, 120) : QPoint(600, 140));
+            const QPointF end = reverse ? QPointF(-40, 20) : QPointF(720, 240);
+            QMouseEvent move(QEvent::MouseMove, end, QPointF(80, 120),
+                             Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(origin, &move);
+            QMouseEvent release(QEvent::MouseButtonRelease, end, QPointF(80, 120),
+                                Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(origin, &release);
+            QCOMPARE(selection->rect(), QRectF(-40, 20, 120, 100));
+            QCOMPARE(left->rootObject()->property("targetRect").toRectF(), selection->rect());
+            QCOMPARE(right->rootObject()->property("targetRect").toRectF(), selection->rect());
+            controller.confirmWithAction("save");
+            if (live) {
+                QTRY_COMPARE(barrier.starts, 1);
+                QVERIFY(barrier.allTransparent);
+                QVERIFY(!barrier.allHidden);
+                QCOMPARE(pixels.acquisitions, 0);
+                barrier.acknowledge();
+                QCOMPARE(pixels.acquisitions, 1);
+                QCOMPARE(pixels.expected, pixels.outputs);
+                pixels.finish(Qt::green, Qt::yellow);
+            } else {
+                QCOMPARE(pixels.verifications, 1);
+                QCOMPARE(pixels.expected, pixels.outputs);
+            }
+            QImage saved(controller.lastCapture());
+            const auto recent = QJsonDocument::fromJson(controller.Recent().toUtf8()).array();
+            QCOMPARE(recent.size(), 1);
+            QCOMPARE(recent.first().toObject()["path"].toString(), controller.lastCapture());
+            QCOMPARE(saved.size(), QSize(240, 200));
+            QCOMPARE(saved.pixelColor(0, 0), QColor(live ? Qt::green : Qt::red));
+            QCOMPARE(saved.pixelColor(79, 199), QColor(live ? Qt::green : Qt::red));
+            QCOMPARE(saved.pixelColor(80, 0), QColor(live ? Qt::yellow : Qt::blue));
+            QCOMPARE(saved.pixelColor(239, 199), QColor(live ? Qt::yellow : Qt::blue));
+            for (auto *window : QGuiApplication::topLevelWindows()) QVERIFY(!window->isVisible());
+          }
+        }
+    }
 
 
     void configuredEditorsAreAvailableOnlyAfterSaving()
@@ -1602,7 +1735,7 @@ private slots:
         QVERIFY(rendered.pixelColor(20, 20).red() < 200);
         QVERIFY(QDir(directory.path()).entryList(QDir::Files).isEmpty());
     }
-    void liveRegionWaitsForUnmapAcknowledgement()
+    void liveRegionWaitsForTransparentFrameAndAcknowledgement()
     {
         QTemporaryDir directory;
         FakePixels pixels;
@@ -1626,8 +1759,22 @@ private slots:
         }
         QVERIFY(controller.canConfirm());
         controller.confirm();
-        QCOMPARE(barrier.starts, 1);
-        QVERIFY(barrier.allHidden);
+        QCOMPARE(barrier.starts, 0); // Never authorize an older opaque frame.
+        QCOMPARE(pixels.acquisitions, 0);
+        QTRY_COMPARE(barrier.starts, 1);
+        QVERIFY(barrier.allTransparent);
+        QVERIFY(!barrier.allHidden); // Avoid compositor close/fade animations.
+        for (auto *window : QGuiApplication::topLevelWindows()) {
+            auto *view = qobject_cast<QQuickView *>(window);
+            if (!view || !view->isVisible()) continue;
+            const auto clean = view->grabWindow().convertToFormat(QImage::Format_ARGB32);
+            QVERIFY(!clean.isNull());
+            int opaquePixels = 0;
+            for (int y = 0; y < clean.height(); ++y)
+                for (int x = 0; x < clean.width(); ++x)
+                    if (qAlpha(clean.pixel(x, y))) ++opaquePixels;
+            QCOMPARE(opaquePixels, 0); // Includes toolbar, dimming and selection handles.
+        }
         QCOMPARE(pixels.acquisitions, 0);
         QVERIFY(QDir(directory.path()).entryList(QDir::Files).isEmpty());
         barrier.acknowledge();
@@ -1674,6 +1821,7 @@ private slots:
         QCOMPARE(windows.captures, 0);
         controller.confirm();
         QCOMPARE(windows.captures, 0);
+        QTRY_COMPARE(barrier.starts, 1);
         barrier.acknowledge();
         QCOMPARE(windows.captures, 1);
         QCOMPARE(windows.target, QString("two"));

@@ -27,7 +27,8 @@ private slots:
             {"record", "window", "--help"}, {"record", "discard", "--help"},
             {"record", "status", "--help"}, {"daemon", "--help"},
             {"cancel", "--help"}, {"quit", "--help"}, {"doctor", "--help"},
-            {"upload", "--help"}, {"lens", "--help"}, {"lens", "window", "--help"}, {"--help-all"}};
+            {"upload", "--help"}, {"lens", "--help"}, {"lens", "window", "--help"},
+            {"recent", "--help"}, {"forget", "--help"}, {"--help-all"}};
         for (const auto &arguments : commands) {
             QProcess process;
             process.setProcessEnvironment(environment);
@@ -107,6 +108,9 @@ private slots:
         QCOMPARE(run({"daemon", "--config", configDirectory.filePath("missing.json")}), 1);
         QCOMPARE(run({"cancel"}), 0);
         QCOMPARE(run({"record", "status"}), 0);
+        QCOMPARE(run({"recent"}), 0);
+        QCOMPARE(run({"forget"}), 0);
+        QCOMPARE(run({"daemon", "--tray"}), 1); // Cannot change an existing instance's mode.
         QString error;
         QCOMPARE(run({"record", "pause"}, &error), 1);
         QVERIFY(error.contains("No active recording to pause/resume."));
@@ -149,7 +153,7 @@ private slots:
         QVERIFY(resident.waitForFinished(5000));
         QCOMPARE(resident.exitCode(), 0);
         QVERIFY(!bus.interface()->isServiceRegistered("io.github.snipline.Application").value());
-        resident.start(binary, {"daemon"});
+        resident.start(binary, {"daemon", "--tray"});
         QVERIFY(resident.waitForStarted());
         QTRY_VERIFY(bus.interface()->isServiceRegistered("io.github.snipline.Application").value());
         resident.terminate(); // SIGTERM is handled on Qt's loop, not abrupt termination.

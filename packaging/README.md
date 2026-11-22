@@ -1,5 +1,11 @@
 # Arch packaging and releases
 
+The package includes optional desktop-integration examples in
+`/usr/share/snipline/`: `snipline-autostart.desktop` and `bindings.md`.
+It never installs an enabled autostart entry or modifies compositor settings.
+The optional tray uses Qt Widgets (provided by the existing `qt6-base`
+dependency); capture UI remains Qt Quick.
+
 The root `PKGBUILD` builds and installs the application and its two helpers with
 `BUILD_TESTING=OFF`. It does not build, run or install tests. `LICENSE` is MIT.
 OCR models, editors and optional hardware-codec plugins remain optional.
