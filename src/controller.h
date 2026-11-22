@@ -10,6 +10,8 @@
 #include "recorder.h"
 #include "core/recordingsession.h"
 #include "audiosources.h"
+#include "recognition.h"
+#include "notification.h"
 #include <QDBusObjectPath>
 #include <QQuickImageProvider>
 #include <QQuickView>
@@ -49,11 +51,22 @@ class Controller final : public QObject {
   Q_PROPERTY(QVariantMap keybindings READ keybindings NOTIFY changed)
   Q_PROPERTY(bool recording READ recording NOTIFY changed)
   Q_PROPERTY(QString recordingFormat READ recordingFormat WRITE setRecordingFormat NOTIFY changed)
+  Q_PROPERTY(QString recordingCodec READ recordingCodec WRITE setRecordingCodec NOTIFY changed)
+  Q_PROPERTY(QString recordingEncoder READ recordingEncoder WRITE setRecordingEncoder NOTIFY changed)
+  Q_PROPERTY(QStringList recordingCodecs READ recordingCodecs NOTIFY changed)
   Q_PROPERTY(bool systemAudio READ systemAudio WRITE setSystemAudio NOTIFY changed)
   Q_PROPERTY(bool microphone READ microphone WRITE setMicrophone NOTIFY changed)
   Q_PROPERTY(QString recordingState READ recordingState NOTIFY changed)
+  Q_PROPERTY(qint64 recordingElapsedMs READ recordingElapsedMs NOTIFY changed)
   Q_PROPERTY(int countdownRemaining READ countdownRemaining NOTIFY changed)
+  Q_PROPERTY(bool recordingControls READ recordingControls NOTIFY changed)
+  Q_PROPERTY(QString recordingResultAction READ recordingResultAction NOTIFY changed)
+  Q_PROPERTY(bool pausePending READ pausePending NOTIFY changed)
+  Q_PROPERTY(QString videoEditor READ videoEditor WRITE setVideoEditor NOTIFY changed)
+  Q_PROPERTY(QString editor READ editor WRITE setEditor NOTIFY changed)
   Q_PROPERTY(QString action READ action NOTIFY changed)
+  Q_PROPERTY(QObject *recognition READ recognition CONSTANT)
+  Q_PROPERTY(QString lastCapture READ lastCapture NOTIFY changed)
   Q_PROPERTY(QString imageFormat READ imageFormat WRITE setImageFormat NOTIFY changed)
   Q_PROPERTY(QString saveDirectory READ saveDirectory WRITE setSaveDirectory NOTIFY changed)
   Q_PROPERTY(QString filenameTemplate READ filenameTemplate WRITE setFilenameTemplate NOTIFY changed)
@@ -89,19 +102,45 @@ public:
   bool nativeWindowPicker() const { return m_picker->nativePickerRequired(); }
   QString pickMessage() const { return m_pickMessage; }
   QVariantMap keybindings() const { return m_config.keybindings; }
-  void configure(const Config &config) { m_config = config; emit changed(); }
+  void configure(const Config &config) {
+    m_config = config;
+    m_recordDirectory = config.recordingDirectory;
+    m_recognition.setPreferredLanguages(config.ocrLanguages);
+    emit changed();
+  }
   bool recording() const { return m_recording; }
   QString recordingFormat() const { return m_recordOptions.format; }
+  QString recordingCodec() const { return m_recordOptions.codec; }
+  QString recordingEncoder() const { return m_recordOptions.encoder; }
+  QStringList recordingCodecs() const { return VideoRecorder::codecsForFormat(recordingFormat()); }
+  void setRecordingCodec(const QString &codec);
+  void setRecordingEncoder(const QString &encoder);
   bool systemAudio() const { return m_recordOptions.systemAudio; }
   bool microphone() const { return m_recordOptions.microphone; }
   QString recordingState() const;
+  qint64 recordingElapsedMs() const { return m_recordSession.elapsedMs(); }
   int countdownRemaining() const { return m_recordSession.countdownRemaining(); }
+  bool recordingControls() const { return m_recordControls; }
+  QString recordingResultAction() const { return m_postRecordingAction.isEmpty() ? QStringLiteral("save") : m_postRecordingAction; }
+  bool pausePending() const { return m_recordSession.pausePending(); }
+  QString videoEditor() const { return m_config.videoEditor; }
+  QString editor() const { return m_recording ? m_config.videoEditor : m_config.screenshotEditor; }
+  void setEditor(const QString &command);
+  void setVideoEditor(const QString &command);
+  Q_INVOKABLE void confirmWithAction(const QString &action);
+  Q_INVOKABLE void stopWithAction(const QString &action);
   void setRecordingFormat(const QString &format);
   void setSystemAudio(bool enabled);
   void setMicrophone(bool enabled);
-  QString action() const { return m_recording ? "record" : "capture"; }
+  QString action() const { return m_recording ? "record" : m_recognitionAction.isEmpty() ? "capture" : m_recognitionAction; }
+  QString lastCapture() const { return m_lastCapture; }
+  QObject *recognition() { return &m_recognition; }
+  Q_INVOKABLE void closeRecognition();
+  Q_INVOKABLE bool copyRecognition(int index = -1);
+  Q_INVOKABLE bool canOpenCode(int index) const;
+  Q_INVOKABLE bool openCode(int index);
   QString imageFormat() const { return QString::fromLatin1(m_format); }
-  QString saveDirectory() const { return m_directory; }
+  QString saveDirectory() const { return m_recording ? m_recordDirectory : m_directory; }
   QString filenameTemplate() const { return m_config.filenameTemplate; }
   bool copyToClipboard() const { return m_config.clipboard; }
   bool notificationsEnabled() const { return m_config.notifications; }
@@ -135,13 +174,18 @@ public:
   Q_INVOKABLE void selectMonitor(int index);
   Q_INVOKABLE void confirm();
   Q_INVOKABLE void cancel();
+  Q_INVOKABLE void hideRecordingControls();
 public slots:
   Q_SCRIPTABLE QString Capture(const QString &mode);
   Q_SCRIPTABLE QString CaptureWithMode(const QString &mode, bool live);
+  Q_SCRIPTABLE QString Recognize(const QString &kind, const QString &target, const QString &file);
+  Q_SCRIPTABLE QString RecognizeWithMode(const QString &kind, const QString &target, const QString &file, int live);
   Q_SCRIPTABLE void Cancel();
   Q_SCRIPTABLE void Quit();
   Q_SCRIPTABLE QString Record(const QString &mode, const QString &format, bool systemAudio, bool microphone);
   Q_SCRIPTABLE QString RecordConfigured(const QString &mode, const QString &format, int systemAudio, int microphone);
+  Q_SCRIPTABLE QString RecordEncoding(const QString &mode, const QString &format, int systemAudio, int microphone,
+                                     const QString &codec, const QString &encoder);
   Q_SCRIPTABLE QString Pause();
   Q_SCRIPTABLE QString Resume();
   Q_SCRIPTABLE QString TogglePause();
@@ -158,10 +202,17 @@ private:
   QVector<Output> expectedLayout() const;
   void afterHidden();
   void hideOverlays();
+  QString showRecordingControls();
+  bool validateResultAction(const QString &action, bool video);
+  void openResult(const QString &path, const QString &action, const QString &editorCommand = {});
+  void notifySaved(const QString &title, const QString &body, const QString &path,
+                   const QString &editorCommand, bool image);
   void restartSelection(const QString &mode, bool live);
   void refreshFrozenFrames(QVector<Frame> frames);
   void restoreTransitionSurfaces();
   void save(const QImage &image);
+  void recognitionFinished(bool success);
+  QUrl codeUrl(int index) const;
   void release();
   void fail(const QString &message);
   void commit();
@@ -193,6 +244,12 @@ private:
   bool m_recording = false, m_recordAcquiring = false, m_encoderStarted = false;
   bool m_quitAfterRecording = false;
   bool m_sessionLocked = false;
+  bool m_recordControls = false;
+  QString m_captureDisposition = "capture", m_postRecordingAction;
+  Recognition m_recognition;
+  NotificationActions m_recognitionNotifications;
+  NotificationActions m_savedNotifications;
+  QString m_recognitionAction, m_lastCapture;
   bool m_captureLive = false;
   int m_frameRevision = 0;
   quint64 m_transitionEpoch = 0;
@@ -203,7 +260,7 @@ private:
   QString m_recordOutput, m_recordWarning, m_lastRecordingPath, m_lastRecordingError;
   QRectF m_recordRegion;
   Config m_config;
-  QString m_directory, m_error, m_mode = "region";
+  QString m_directory, m_recordDirectory, m_error, m_mode = "region";
   QString m_windowId;
   QString m_pickMessage;
   QString m_hoveredWindow;

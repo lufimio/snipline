@@ -5,10 +5,50 @@ import QtQuick.Layouts
 Item {
     id: root
     readonly property var audioController: controller
-    readonly property bool editingOptions: sessionSettings.visible || audioSelector.popup.visible
+    readonly property string statusMessage: controller.error.length ? controller.error : controller.pickMessage
+    function showStatusMessage() {
+        if (!errorToast) return
+        errorToastTimer.stop()
+        if (!statusMessage.length) {
+            errorToast.opacity = 0
+            return
+        }
+        errorToast.message = statusMessage
+        errorToast.opacity = 1
+        errorToastTimer.restart()
+    }
+    onStatusMessageChanged: showStatusMessage()
+    function canUseResultShortcut(action) {
+        if (root.editingOptions) return false
+        if (action === "copy" && controller.action !== "capture") return false
+        if (root.selecting)
+            return (controller.action === "capture" || controller.action === "record") && controller.canConfirm
+        return controller.recordingControls && !controller.pausePending
+                && (controller.recordingState === "Recording" || controller.recordingState === "Paused")
+    }
+    function useResultShortcut(action) {
+        if (!canUseResultShortcut(action)) return
+        advancedMenu.close()
+        if (root.selecting) controller.confirmWithAction(action)
+        else controller.stopWithAction(action)
+    }
+    function resultShortcut(action) {
+        const keys = action === "capture" ? controller.keybindings.confirm : controller.keybindings[action]
+        return keys && keys.length ? keys[0] : ""
+    }
+    Component.onCompleted: showStatusMessage()
+    readonly property bool selecting: !controller.recording || controller.recordingState === "Selecting"
+    function recordingElapsedText() {
+        const seconds = Math.floor(controller.recordingElapsedMs / 1000)
+        return Math.floor(seconds / 3600).toString().padStart(2, "0") + ":"
+                + Math.floor(seconds / 60 % 60).toString().padStart(2, "0") + ":"
+                + (seconds % 60).toString().padStart(2, "0")
+    }
+    readonly property bool editingOptions: sessionSettings.visible || audioSelector.popup.visible || ocrLanguageSelector.popup.visible
                                           || advancedMenu.visible || targetSelector.popup.visible
                                           || windowPicker.popup.visible || imageFormatSelector.popup.visible
-                                          || videoFormatSelector.popup.visible
+                                          || videoFormatSelector.popup.visible || videoCodecSelector.popup.visible
+                                          || videoEncoderSelector.popup.visible
     focus: true
     clip: true
     property real sx: width / outputRect.width
@@ -58,7 +98,7 @@ Item {
     }
     Shortcut {
         sequences: controller.keybindings.confirm
-        enabled: !root.editingOptions
+        enabled: !root.editingOptions && root.selecting
         context: Qt.WindowShortcut
         onActivated: controller.confirm()
     }
@@ -66,23 +106,93 @@ Item {
         sequences: controller.keybindings.cancel
         enabled: !root.editingOptions
         context: Qt.WindowShortcut
-        onActivated: controller.cancel()
+        onActivated: controller.recordingControls ? controller.hideRecordingControls() : controller.cancel()
+    }
+    Shortcut {
+        sequences: controller.keybindings.save
+        enabled: root.canUseResultShortcut("save")
+        context: Qt.WindowShortcut
+        onActivated: root.useResultShortcut("save")
+    }
+    Shortcut {
+        sequences: controller.keybindings.copy
+        enabled: root.canUseResultShortcut("copy")
+        context: Qt.WindowShortcut
+        onActivated: root.useResultShortcut("copy")
+    }
+    Shortcut {
+        sequences: controller.keybindings.open
+        enabled: root.canUseResultShortcut("open")
+        context: Qt.WindowShortcut
+        onActivated: root.useResultShortcut("open")
+    }
+    Shortcut {
+        sequences: controller.keybindings.folder
+        enabled: root.canUseResultShortcut("folder")
+        context: Qt.WindowShortcut
+        onActivated: root.useResultShortcut("folder")
+    }
+    Shortcut {
+        sequences: controller.keybindings.edit
+        enabled: root.canUseResultShortcut("edit")
+        context: Qt.WindowShortcut
+        onActivated: root.useResultShortcut("edit")
+    }
+    Shortcut {
+        sequences: controller.keybindings.cursor
+        enabled: !root.editingOptions && root.selecting && !controller.busy
+                 && (controller.action === "capture" || controller.action === "record")
+        context: Qt.WindowShortcut
+        onActivated: {
+            if (controller.recording) root.recordCursorVisible = !root.recordCursorVisible
+            else root.captureCursorVisible = !root.captureCursorVisible
+        }
+    }
+    Shortcut {
+        sequences: controller.keybindings.live
+        enabled: !root.editingOptions && root.selecting && !controller.recording && !controller.busy
+        context: Qt.WindowShortcut
+        onActivated: controller.setLive(!controller.live)
+    }
+    Shortcut {
+        sequences: controller.keybindings.capture
+        enabled: !root.editingOptions && root.selecting && !controller.busy
+        context: Qt.WindowShortcut
+        onActivated: controller.setAction("capture")
+    }
+    Shortcut {
+        sequences: controller.keybindings.record
+        enabled: !root.editingOptions && root.selecting && !controller.busy
+        context: Qt.WindowShortcut
+        onActivated: controller.setAction("record")
+    }
+    Shortcut {
+        sequences: controller.keybindings.qr
+        enabled: !root.editingOptions && root.selecting && !controller.busy
+        context: Qt.WindowShortcut
+        onActivated: controller.setAction("qr")
+    }
+    Shortcut {
+        sequences: controller.keybindings.ocr
+        enabled: !root.editingOptions && root.selecting && !controller.busy
+        context: Qt.WindowShortcut
+        onActivated: controller.setAction("ocr")
     }
     Shortcut {
         sequences: controller.keybindings.region
-        enabled: !root.editingOptions
+        enabled: !root.editingOptions && root.selecting
         context: Qt.WindowShortcut
         onActivated: controller.setMode("region")
     }
     Shortcut {
         sequences: controller.keybindings.monitor
-        enabled: !root.editingOptions
+        enabled: !root.editingOptions && root.selecting
         context: Qt.WindowShortcut
         onActivated: controller.setMode("monitor")
     }
     Shortcut {
         sequences: controller.keybindings.window
-        enabled: !root.editingOptions
+        enabled: !root.editingOptions && root.selecting
         context: Qt.WindowShortcut
         onActivated: controller.setMode("window")
     }
@@ -95,6 +205,7 @@ Item {
         fillMode: Image.Stretch
     }
     Item {
+        objectName: "selectionDimming"
         anchors.fill: parent
         Repeater {
             model: root.dimmedRectangles()
@@ -110,7 +221,7 @@ Item {
         }
     }
     Rectangle {
-        visible: controller.mode === "window" && root.hoverRect.width > 0 && root.hoverRect.height > 0
+        visible: root.selecting && controller.mode === "window" && root.hoverRect.width > 0 && root.hoverRect.height > 0
         x: (root.hoverRect.x - outputRect.x) * root.sx
         y: (root.hoverRect.y - outputRect.y) * root.sy
         width: root.hoverRect.width * root.sx
@@ -138,14 +249,14 @@ Item {
                 width: theme.handleSize
                 height: width
                 color: theme.accent
-                visible: controller.mode === "region"
+                visible: root.selecting && controller.mode === "region"
             }
         }
     }
     MouseArea {
         anchors.fill: parent
-        enabled: controller.mode === "window" ? controller.canRetarget
-                 : !controller.busy && controller.error.length === 0
+        enabled: root.selecting && (controller.mode === "window" ? controller.canRetarget
+                 : !controller.busy && controller.error.length === 0)
         hoverEnabled: true
         cursorShape: controller.mode === "region" ? Qt.CrossCursor : Qt.PointingHandCursor
         onEntered: {
@@ -185,11 +296,229 @@ Item {
     property bool recordCursorVisible: false
     property real toolbarX: Math.max(16, (width - 510) / 2)
     property real toolbarBottom: 14
-    readonly property color panelColor: "#111214"
-    readonly property color panelText: "#f1f1f2"
-    readonly property color secondaryText: "#a5a8ae"
-    readonly property color hoverColor: "#24262a"
-    readonly property color selectedColor: "#2b2e34"
+    Timer {
+        id: errorToastTimer
+        interval: 5000
+        onTriggered: errorToast.opacity = 0
+    }
+    Rectangle {
+        id: errorToast
+        objectName: "errorToast"
+        property string message: ""
+        readonly property Item bar: controller.recordingControls ? recordingToolbar : toolbar
+        x: bar.x
+        y: Math.max(8, bar.y - height - 8)
+        width: bar.width
+        height: errorToastText.implicitHeight + 20
+        z: 10
+        radius: theme.radius
+        color: theme.popupColor
+        border.color: theme.borderColor
+        opacity: 0
+        visible: opacity > 0
+        Behavior on opacity { NumberAnimation { duration: 250 } }
+        Text {
+            id: errorToastText
+            objectName: "errorToastText"
+            x: 12; y: 10
+            width: Math.max(0, parent.width - 24)
+            text: errorToast.message
+            textFormat: Text.PlainText
+            color: theme.foreground
+            font.family: theme.fontFamily
+            font.pixelSize: theme.fontSize
+            wrapMode: Text.Wrap
+        }
+    }
+    Rectangle {
+        objectName: "recordingCountdown"
+        x: root.rx + (root.rw - width) / 2
+        y: root.ry + (root.rh - height) / 2
+        width: 144; height: 144; radius: 72
+        color: root.panelColor
+        visible: controller.recording && controller.recordingState === "Countdown"
+                 && root.highlightValid
+                 && root.rx + root.rw > 0 && root.ry + root.rh > 0 && root.rx < root.width && root.ry < root.height
+        Text {
+            objectName: "countdownNumber"
+            anchors.centerIn: parent
+            text: controller.countdownRemaining
+            color: root.panelText
+            font.pixelSize: 80
+            font.family: theme.fontFamily
+            font.bold: true
+        }
+    }
+    Rectangle {
+        id: recordingToolbar
+        objectName: "recordingControls"
+        visible: controller.recordingControls
+        x: Math.max(16, Math.min(root.width - width - 16, root.toolbarX))
+        y: Math.max(8, Math.min(root.height - height - 8, root.height - height - root.toolbarBottom))
+        width: Math.min(parent.width - 32, 320)
+        height: 47
+        radius: theme.radius + 2; color: root.panelColor
+        border.width: 1
+        border.color: theme.borderColor
+        MouseArea { anchors.fill: parent }
+        RowLayout {
+            id: recordingControlFields
+            anchors.fill: parent
+            anchors.leftMargin: 12; anchors.rightMargin: 12
+            anchors.topMargin: 9; anchors.bottomMargin: 9
+            spacing: 4
+            Item {
+                Layout.preferredWidth: 18; Layout.fillHeight: true
+                Glyph {
+                    anchors.centerIn: parent
+                    name: "grip"; color: root.secondaryText
+                    width: 12; height: 17
+                }
+                DragHandler {
+                    target: null
+                    property real startX: 0
+                    property real startBottom: 0
+                    onActiveChanged: if (active) {
+                        startX = recordingToolbar.x
+                        startBottom = root.height - recordingToolbar.y - recordingToolbar.height
+                    }
+                    onTranslationChanged: if (active) {
+                        root.toolbarX = startX + translation.x
+                        root.toolbarBottom = startBottom - translation.y
+                    }
+                }
+            }
+            Text {
+                objectName: "recordingElapsed"
+                Layout.fillWidth: true
+                text: controller.recordingState === "Finalizing" ? "Saving recording…"
+                      : (controller.recordingState === "Paused" ? "Paused · " : "Recording · ") + root.recordingElapsedText()
+                color: root.panelText
+                font.pixelSize: theme.fontSize
+                font.family: theme.fontFamily
+                elide: Text.ElideRight
+            }
+            Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 18; color: theme.separatorColor }
+                IconButton {
+                    objectName: "recordingPauseResume"
+                    glyph: controller.recordingState === "Paused" ? "play" : "pause"
+                    tip: controller.recordingState === "Paused" ? "Resume recording" : "Pause recording"
+                    enabled: !controller.pausePending &&
+                             (controller.recordingState === "Paused" || controller.recordingState === "Recording")
+                    onClicked: controller.TogglePause()
+                }
+                IconButton {
+                    objectName: "recordingStop"
+                    glyph: "stop"; tip: "Finish recording"
+                    enabled: controller.recordingState === "Paused" || controller.recordingState === "Recording"
+                    onClicked: controller.stopWithAction(controller.recordingResultAction)
+                }
+                IconButton {
+                    objectName: "recordingDiscard"
+                    glyph: "discard"; tip: "Discard recording"
+                    onClicked: controller.cancel()
+                }
+                IconButton {
+                    objectName: "recordingHideControls"
+                    glyph: "close"; tip: "Hide controls (keep recording)"
+                    onClicked: controller.hideRecordingControls()
+                }
+        }
+    }
+    readonly property color panelColor: theme.background
+    readonly property color panelText: theme.foreground
+    readonly property color secondaryText: theme.secondaryText
+    readonly property color hoverColor: theme.hoverColor
+    readonly property color selectedColor: theme.selectedColor
+    component ResultMenu: Popup {
+        id: resultMenu
+        property bool video: false
+        property bool stopping: false
+        width: 230
+        implicitHeight: resultActions.implicitHeight + 10
+        padding: 5
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle {
+            color: theme.popupColor; radius: theme.radius + 1
+            border.width: 1; border.color: theme.borderColor
+        }
+        contentItem: ColumnLayout {
+            id: resultActions
+            spacing: 1
+            Repeater {
+                model: resultMenu.video ? [
+                    { label: resultMenu.stopping ? "Save recording" : "Record", icon: "record", action: "save" },
+                    { label: "Upload", icon: "upload", action: "upload" },
+                    { label: "Edit", icon: "ocr", action: "edit" },
+                    { label: "Open folder", icon: "window", action: "folder" },
+                    { label: "Open video", icon: "record", action: "open" },
+                ] : [
+                    { label: "Capture", icon: "capture", action: "capture" },
+                    { label: "Save", icon: "image", action: "save" },
+                    { label: "Copy", icon: "check", action: "copy" },
+                    { label: "Upload", icon: "upload", action: "upload" },
+                    { label: "Edit", icon: "ocr", action: "edit" },
+                    { label: "Open folder", icon: "window", action: "folder" },
+                    { label: "Open picture", icon: "image", action: "open" },
+                ]
+                delegate: ItemDelegate {
+                    id: resultAction
+                    required property var modelData
+                    objectName: "resultAction_" + modelData.action
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 30
+                    leftPadding: 10; rightPadding: 10
+                    topPadding: 0; bottomPadding: 0
+                    enabled: modelData.action !== "upload" && (resultMenu.stopping
+                             ? !controller.pausePending && (controller.recordingState === "Paused" || controller.recordingState === "Recording")
+                             : controller.canConfirm)
+                    hoverEnabled: true
+                    onClicked: {
+                        resultMenu.close()
+                        if (resultMenu.stopping) controller.stopWithAction(modelData.action)
+                        else controller.confirmWithAction(modelData.action)
+                    }
+                    background: Rectangle {
+                        radius: 5
+                        color: resultAction.hovered && resultAction.enabled ? theme.hoverColor : "transparent"
+                    }
+                    contentItem: Item {
+                        opacity: resultAction.enabled ? 1 : 0.42
+                        Glyph {
+                            objectName: "resultItemIcon"
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            name: resultAction.modelData.icon
+                            color: theme.foreground
+                            width: 15; height: 15
+                        }
+                        Text {
+                            objectName: "resultItemLabel"
+                            anchors.left: parent.left
+                            anchors.leftMargin: 25
+                            anchors.right: resultItemShortcut.left
+                            anchors.rightMargin: resultItemShortcut.text.length ? 10 : 0
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: resultAction.modelData.label; color: theme.foreground
+                            font.pixelSize: theme.fontSize; font.family: theme.fontFamily
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            id: resultItemShortcut
+                            objectName: "resultItemShortcut"
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.resultShortcut(resultAction.modelData.action)
+                            color: theme.secondaryText
+                            font.pixelSize: theme.fontSize - 1
+                            font.family: theme.fontFamily
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     component FlatCombo: ComboBox {
         id: combo
@@ -209,7 +538,7 @@ Item {
             verticalAlignment: Text.AlignVCenter
             leftPadding: 8
             rightPadding: 28
-            font.pixelSize: 12
+            font.pixelSize: theme.fontSize
             color: combo.enabled ? root.panelText : root.secondaryText
             elide: Text.ElideRight
         }
@@ -228,7 +557,7 @@ Item {
             width: combo.popup.contentItem ? combo.popup.contentItem.width : combo.width - 8
             height: 30
             text: combo.textAt(index)
-            font.pixelSize: 12
+            font.pixelSize: theme.fontSize
             contentItem: Text {
                 text: option.text
                 color: root.panelText
@@ -237,7 +566,7 @@ Item {
                 leftPadding: 8
                 rightPadding: 8
                 elide: Text.ElideRight
-                font.pixelSize: 12
+                font.pixelSize: theme.fontSize
             }
             background: Rectangle {
                 radius: 5
@@ -250,10 +579,10 @@ Item {
             implicitHeight: Math.min(contentItem.implicitHeight + 8, 240)
             padding: 4
             background: Rectangle {
-                color: "#1a1b1f"
+                color: theme.popupColor
                 radius: 8
                 border.width: 1
-                border.color: "#36383d"
+                border.color: theme.borderColor
             }
             contentItem: ListView {
                 clip: true
@@ -269,7 +598,7 @@ Item {
         id: check
         implicitHeight: 28
         spacing: 8
-        font.pixelSize: 12
+        font.pixelSize: theme.fontSize
         indicator: Rectangle {
             implicitWidth: 15; implicitHeight: 15
             x: check.width - width - 5
@@ -277,19 +606,19 @@ Item {
             radius: 3
             color: check.checked ? root.panelText : "transparent"
             border.width: 1
-            border.color: check.checked ? root.panelText : "#74777e"
+            border.color: check.checked ? root.panelText : theme.mutedBorder
             Glyph {
                 anchors.centerIn: parent
                 width: 12; height: 12
                 visible: check.checked
                 name: "check"
-                color: "#121316"
+                color: theme.buttonText
             }
         }
         contentItem: Text {
             text: check.text
             color: root.secondaryText
-            font.pixelSize: 12
+            font.pixelSize: theme.fontSize
             verticalAlignment: Text.AlignVCenter
             rightPadding: 32
         }
@@ -300,7 +629,7 @@ Item {
         implicitWidth: 90
         implicitHeight: 30
         editable: true
-        font.pixelSize: 12
+        font.pixelSize: theme.fontSize
         background: Rectangle {
             radius: 5
             color: root.hoverColor
@@ -308,7 +637,7 @@ Item {
         contentItem: TextInput {
             text: spin.textFromValue(spin.value, spin.locale)
             color: root.panelText
-            font.pixelSize: 12
+            font.pixelSize: theme.fontSize
             horizontalAlignment: Qt.AlignHCenter
             verticalAlignment: Qt.AlignVCenter
             readOnly: !spin.editable
@@ -346,6 +675,7 @@ Item {
 
     Control {
         id: toolbar
+        visible: root.selecting
         objectName: "multiTierToolbar"
         x: Math.max(16, Math.min(root.width - width - 16, root.toolbarX))
         y: Math.max(8, Math.min(root.height - height - 8, root.height - height - root.toolbarBottom))
@@ -355,7 +685,7 @@ Item {
         topPadding: 9; bottomPadding: 9
         leftPadding: 12; rightPadding: 12
         font.family: theme.fontFamily
-        font.pixelSize: 12
+        font.pixelSize: theme.fontSize
         palette.button: root.panelColor
         palette.base: root.panelColor
         palette.text: root.panelText
@@ -365,9 +695,9 @@ Item {
         palette.highlightedText: root.panelColor
         background: Rectangle {
             color: root.panelColor
-            radius: 10
+            radius: theme.radius + 2
             border.width: 1
-            border.color: "#34353a"
+            border.color: theme.borderColor
         }
         // Swallow clicks in the toolbar rather than passing them to the capture area.
         MouseArea { anchors.fill: parent; hoverEnabled: true; onEntered: controller.clearWindowHover() }
@@ -398,8 +728,21 @@ Item {
                 width: optionsScroll.availableWidth
                 spacing: 1
                 RowLayout {
+                    visible: controller.action === "ocr"
                     Layout.fillWidth: true; Layout.preferredHeight: 30
-                    Label { text: "Target"; color: root.secondaryText; font.pixelSize: 12; Layout.fillWidth: true }
+                    Label { text: "OCR languages"; color: root.secondaryText; font.pixelSize: theme.fontSize; Layout.fillWidth: true }
+                    LanguageSelector {
+                        id: ocrLanguageSelector
+                        objectName: "ocrLanguageSelector"
+                        recognition: controller.recognition
+                        locked: controller.busy
+                        enabled: !controller.busy
+                        Layout.preferredWidth: 146
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true; Layout.preferredHeight: 30
+                    Label { text: "Target"; color: root.secondaryText; font.pixelSize: theme.fontSize; Layout.fillWidth: true }
                     FlatCombo {
                         id: targetSelector
                         objectName: "targetSelector"
@@ -411,10 +754,11 @@ Item {
                     }
                 }
                 RowLayout {
+                    visible: controller.action === "capture" || controller.action === "record"
                     Layout.fillWidth: true; Layout.preferredHeight: 30
                     Label {
                         text: "Show cursor"
-                        color: root.secondaryText; font.pixelSize: 12
+                        color: root.secondaryText; font.pixelSize: theme.fontSize
                         Layout.fillWidth: true
                     }
                     FlatCheck {
@@ -433,7 +777,7 @@ Item {
                 RowLayout {
                     visible: controller.mode === "window"
                     Layout.fillWidth: true; Layout.preferredHeight: 30
-                    Label { text: "Window"; color: root.secondaryText; font.pixelSize: 12; Layout.fillWidth: true }
+                    Label { text: "Window"; color: root.secondaryText; font.pixelSize: theme.fontSize; Layout.fillWidth: true }
                     FlatCombo {
                         id: windowPicker
                         objectName: "windowPicker"
@@ -453,7 +797,7 @@ Item {
                 RowLayout {
                     visible: !controller.recording
                     Layout.fillWidth: true; Layout.preferredHeight: 30
-                    Label { text: "Freeze screen"; color: root.secondaryText; font.pixelSize: 12; Layout.fillWidth: true }
+                    Label { text: "Freeze screen"; color: root.secondaryText; font.pixelSize: theme.fontSize; Layout.fillWidth: true }
                     FlatCheck {
                         objectName: "freezeScreen"
                         Layout.preferredWidth: 40
@@ -464,8 +808,9 @@ Item {
                     }
                 }
                 RowLayout {
+                    visible: controller.action === "capture" || controller.action === "record"
                     Layout.fillWidth: true; Layout.preferredHeight: 30
-                    Label { text: "Format"; color: root.secondaryText; font.pixelSize: 12; Layout.fillWidth: true }
+                    Label { text: "Format"; color: root.secondaryText; font.pixelSize: theme.fontSize; Layout.fillWidth: true }
                     FlatCombo {
                         id: imageFormatSelector
                         objectName: "imageFormatSelector"
@@ -488,7 +833,37 @@ Item {
                 RowLayout {
                     visible: controller.recording
                     Layout.fillWidth: true; Layout.preferredHeight: 30
-                    Label { text: "Audio sources"; color: root.secondaryText; font.pixelSize: 12; Layout.fillWidth: true }
+                    Label { text: "Video codec"; color: root.secondaryText; font.pixelSize: theme.fontSize; Layout.fillWidth: true }
+                    FlatCombo {
+                        id: videoCodecSelector
+                        objectName: "videoCodecSelector"
+                        Layout.preferredWidth: 146
+                        model: controller.recordingCodecs
+                        displayText: ({"auto": "Automatic", "h264": "H.264", "h265": "H.265 / HEVC",
+                                       "vp8": "VP8", "vp9": "VP9", "av1": "AV1"})[currentValue] || "Automatic"
+                        currentIndex: Math.max(0, controller.recordingCodecs.indexOf(controller.recordingCodec))
+                        onActivated: controller.recordingCodec = controller.recordingCodecs[currentIndex]
+                    }
+                }
+                RowLayout {
+                    visible: controller.recording
+                    Layout.fillWidth: true; Layout.preferredHeight: 30
+                    Label { text: "Video encoder"; color: root.secondaryText; font.pixelSize: theme.fontSize; Layout.fillWidth: true }
+                    FlatCombo {
+                        id: videoEncoderSelector
+                        objectName: "videoEncoderSelector"
+                        Layout.preferredWidth: 146
+                        model: controller.recordingFormat === "gif" ? ["Software", "Automatic"]
+                               : ["Software", "Automatic", "VA-API (Intel / AMD)", "NVIDIA NVENC", "Intel QSV"]
+                        readonly property var backends: ["software", "auto", "vaapi", "nvenc", "qsv"]
+                        currentIndex: Math.max(0, backends.indexOf(controller.recordingEncoder))
+                        onActivated: controller.recordingEncoder = backends[currentIndex]
+                    }
+                }
+                RowLayout {
+                    visible: controller.recording
+                    Layout.fillWidth: true; Layout.preferredHeight: 30
+                    Label { text: "Audio sources"; color: root.secondaryText; font.pixelSize: theme.fontSize; Layout.fillWidth: true }
                     AudioSelector {
                         id: audioSelector
                         objectName: "audioSourcesButton"
@@ -499,7 +874,7 @@ Item {
                 RowLayout {
                     visible: controller.recording
                     Layout.fillWidth: true; Layout.preferredHeight: 30
-                    Label { text: "Frame rate"; color: root.secondaryText; font.pixelSize: 12; Layout.fillWidth: true }
+                    Label { text: "Frame rate"; color: root.secondaryText; font.pixelSize: theme.fontSize; Layout.fillWidth: true }
                     FlatSpin {
                         objectName: "recordingFps"
                         from: 1; to: 120
@@ -510,7 +885,7 @@ Item {
                 RowLayout {
                     visible: controller.recording
                     Layout.fillWidth: true; Layout.preferredHeight: 30
-                    Label { text: "Delay (seconds)"; color: root.secondaryText; font.pixelSize: 12; Layout.fillWidth: true }
+                    Label { text: "Delay (seconds)"; color: root.secondaryText; font.pixelSize: theme.fontSize; Layout.fillWidth: true }
                     FlatSpin {
                         objectName: "recordingCountdown"
                         from: 0; to: 30
@@ -518,28 +893,16 @@ Item {
                         onValueModified: controller.countdownSeconds = value
                     }
                 }
-                RowLayout {
-                    visible: !controller.recording
-                    Layout.fillWidth: true; Layout.preferredHeight: 30
-                    Label { text: "Copy to clipboard"; color: root.secondaryText; font.pixelSize: 12; Layout.fillWidth: true }
-                    FlatCheck {
-                        objectName: "copyToClipboard"
-                        Layout.preferredWidth: 40
-                        text: ""
-                        checked: controller.copyToClipboard
-                        onToggled: controller.copyToClipboard = checked
-                    }
-                }
                 Label {
                     visible: controller.mode === "window" && (controller.windowUnavailable.length > 0 || controller.windows.length === 0)
                     text: controller.windowUnavailable.length > 0 ? controller.windowUnavailable : "No capturable windows found"
-                    color: root.secondaryText; font.pixelSize: 12
+                    color: root.secondaryText; font.pixelSize: theme.fontSize
                     wrapMode: Text.Wrap; Layout.fillWidth: true
                 }
                 Rectangle {
                     Layout.fillWidth: true; Layout.preferredHeight: 1
                     Layout.topMargin: 7; Layout.bottomMargin: 6
-                    color: "#292b2f"
+                    color: theme.separatorColor
                 }
                 }
             }
@@ -588,13 +951,25 @@ Item {
                 IconButton {
                     objectName: "qrAction"
                     visible: !modeRow.compact
-                    glyph: "qr"; tip: "Scan QR · not implemented"
-                    enabled: false
+                    glyph: "qr"; tip: "Scan QR / barcodes"
+                    checkable: true; checked: controller.action === "qr"
+                    autoExclusive: true
+                    enabled: !controller.busy
+                    onClicked: controller.setAction("qr")
                 }
                 IconButton {
                     objectName: "ocrAction"
                     visible: !modeRow.compact
-                    glyph: "ocr"; tip: "OCR · not implemented"
+                    glyph: "ocr"; tip: "Recognize text"
+                    checkable: true; checked: controller.action === "ocr"
+                    autoExclusive: true
+                    enabled: !controller.busy
+                    onClicked: controller.setAction("ocr")
+                }
+                IconButton {
+                    objectName: "lensAction"
+                    visible: !modeRow.compact
+                    glyph: "lens"; tip: "Google Lens · not implemented"
                     enabled: false
                 }
                 Item { Layout.fillWidth: true; Layout.minimumWidth: 4 }
@@ -612,7 +987,7 @@ Item {
                 Rectangle {
                     Layout.preferredWidth: 1; Layout.preferredHeight: 18
                     Layout.leftMargin: 4; Layout.rightMargin: 3
-                    color: "#323338"
+                    color: theme.separatorColor
                 }
                 Button {
                     objectName: "cancelAction"
@@ -630,7 +1005,7 @@ Item {
                             anchors.fill: parent
                             visible: !modeRow.compact
                             text: "Cancel"; color: root.secondaryText
-                            font.pixelSize: 12
+                            font.pixelSize: theme.fontSize
                             horizontalAlignment: Text.AlignHCenter
                             verticalAlignment: Text.AlignVCenter
                         }
@@ -638,20 +1013,35 @@ Item {
                     }
                     onClicked: controller.cancel()
                 }
-                RowLayout {
+                Control {
+                    id: confirmSplit
+                    objectName: "confirmSplitButton"
+                    Layout.preferredWidth: (modeRow.compact ? 34 : 75) + (advancedCapture.visible ? 24 : 0)
+                    Layout.preferredHeight: 29
+                    padding: 0
+                    background: Rectangle {
+                        radius: 6
+                        color: confirmAction.enabled ? theme.buttonColor : theme.disabledColor
+                    }
+                    contentItem: RowLayout {
                     spacing: 0
-                    Layout.preferredHeight: 30
                     Button {
                         id: confirmAction
                         objectName: "confirmAction"
-                        text: controller.recording ? "Record" : "Capture"
+                        text: controller.recording ? "Record" : controller.action === "qr" ? "Scan" : controller.action === "ocr" ? "OCR" : "Capture"
                         enabled: controller.canConfirm
                         Layout.preferredWidth: modeRow.compact ? 34 : 75
                         Layout.preferredHeight: 29
                         hoverEnabled: true
                         background: Rectangle {
-                            color: !confirmAction.enabled ? "#34363b" : confirmAction.hovered ? "#e1e2e5" : "#f0f0f2"
+                            color: confirmAction.enabled && confirmAction.hovered ? theme.buttonHoverColor : "transparent"
                             radius: 6
+                            Rectangle {
+                                visible: advancedCapture.visible
+                                anchors.right: parent.right
+                                width: parent.width / 2; height: parent.height
+                                color: parent.color
+                            }
                         }
                         ToolTip.visible: hovered
                         ToolTip.text: confirmAction.text
@@ -660,16 +1050,16 @@ Item {
                                 anchors.fill: parent
                                 visible: !modeRow.compact
                                 text: confirmAction.text
-                                color: confirmAction.enabled ? "#131416" : "#8f939b"
+                                color: confirmAction.enabled ? theme.buttonText : theme.disabledText
                                 horizontalAlignment: Text.AlignHCenter
                                 verticalAlignment: Text.AlignVCenter
-                                font.pixelSize: 12; font.weight: Font.DemiBold
+                                font.pixelSize: theme.fontSize; font.weight: Font.DemiBold
                             }
                             Glyph {
                                 anchors.centerIn: parent
                                 visible: modeRow.compact
                                 name: controller.recording ? "record" : "capture"
-                                color: confirmAction.enabled ? "#131416" : "#8f939b"
+                                color: confirmAction.enabled ? theme.buttonText : theme.disabledText
                                 width: 17; height: 17
                             }
                         }
@@ -678,98 +1068,47 @@ Item {
                     ToolButton {
                         id: advancedCapture
                         objectName: "advancedCapture"
-                        visible: !controller.recording && !modeRow.compact
-                        enabled: true
+                        visible: !modeRow.compact && (controller.action === "capture" || controller.action === "record")
+                        enabled: confirmAction.enabled
                         Layout.preferredWidth: 24; Layout.preferredHeight: 29
                         hoverEnabled: true
                         background: Rectangle {
-                            color: !advancedCapture.enabled ? "#34363b" : advancedCapture.hovered ? "#e1e2e5" : "#f0f0f2"
+                            color: advancedCapture.enabled && advancedCapture.hovered ? theme.buttonHoverColor : "transparent"
                             radius: 6
                             Rectangle {
-                                width: 1; height: 14
+                                anchors.left: parent.left
+                                width: parent.width / 2; height: parent.height
+                                color: parent.color
+                            }
+                            Rectangle {
+                                objectName: "splitButtonDivider"
+                                width: 1; height: 10
                                 anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
-                                color: "#c9cbd0"
+                                color: advancedCapture.enabled ? theme.buttonText : theme.disabledText
+                                opacity: 0.22
                             }
                         }
                         contentItem: Item {
                             Glyph {
                                 anchors.centerIn: parent
                                 width: 12; height: 12
-                                name: "chevron"; color: "#131416"
+                                name: "chevron"; color: advancedCapture.enabled ? theme.buttonText : theme.disabledText
+                                opacity: advancedCapture.enabled ? 1 : 0.42
                                 rotation: advancedMenu.visible ? 180 : 0
                                 Behavior on rotation { NumberAnimation { duration: 140 } }
                             }
                         }
                         onClicked: advancedMenu.open()
-                        Popup {
+                        ResultMenu {
                             id: advancedMenu
+                            objectName: "advancedResultMenu"
+                            video: controller.recording
                             x: advancedCapture.width - width
                             y: -implicitHeight - 8
-                            width: 194
-                            implicitHeight: actionList.implicitHeight + 10
-                            padding: 5
-                            focus: true
-                            closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-                            background: Rectangle {
-                                color: "#1a1b1f"
-                                radius: 9
-                                border.width: 1
-                                border.color: "#37393e"
-                            }
-                            contentItem: ColumnLayout {
-                                id: actionList
-                                spacing: 1
-                                Repeater {
-                                    model: [
-                                        { label: "Capture", icon: "capture", ready: true },
-                                        { label: "Save", icon: "image", ready: false },
-                                        { label: "Copy", icon: "check", ready: false },
-                                        { label: "Annotate", icon: "ocr", ready: false },
-                                        { label: "Open folder", icon: "window", ready: false },
-                                        { label: "Open picture", icon: "image", ready: false }
-                                    ]
-                                    delegate: ItemDelegate {
-                                        required property var modelData
-                                        Layout.fillWidth: true
-                                        Layout.preferredHeight: 30
-                                        enabled: modelData.ready && controller.canConfirm
-                                        hoverEnabled: true
-                                        onClicked: {
-                                            advancedMenu.close()
-                                            if (modelData.label === "Capture") controller.confirm()
-                                        }
-                                        background: Rectangle {
-                                            radius: 5
-                                            color: parent.hovered && parent.enabled ? root.hoverColor : "transparent"
-                                        }
-                                        contentItem: RowLayout {
-                                            spacing: 10
-                                            Glyph {
-                                                name: modelData.icon
-                                                color: root.panelText
-                                                width: 15; height: 15
-                                                opacity: parent.parent.enabled ? 1 : 0.42
-                                            }
-                                            Text {
-                                                text: modelData.label
-                                                color: root.panelText
-                                                opacity: parent.parent.enabled ? 1 : 0.42
-                                                font.pixelSize: 12
-                                                Layout.fillWidth: true
-                                            }
-                                        }
-                                    }
-                                }
-                            }
                         }
                     }
+                    }
                 }
-            }
-            Label {
-                visible: controller.pickMessage.length > 0 || controller.error.length > 0
-                text: controller.error.length ? controller.error : controller.pickMessage
-                color: root.panelText; font.pixelSize: 12
-                wrapMode: Text.Wrap; Layout.fillWidth: true
             }
         }
     }
@@ -796,9 +1135,9 @@ Item {
         }
         background: Rectangle {
             color: root.panelColor
-            radius: 10
+            radius: theme.radius + 2
             border.width: 1
-            border.color: "#34353a"
+            border.color: theme.borderColor
         }
         contentItem: ScrollView {
             clip: true
@@ -851,7 +1190,7 @@ Item {
                 Text {
                     text: "Save directory"
                     color: root.secondaryText
-                    font.pixelSize: 12
+                    font.pixelSize: theme.fontSize
                     Layout.topMargin: 3
                 }
                 TextField {
@@ -861,9 +1200,9 @@ Item {
                     Layout.preferredHeight: 32
                     selectByMouse: true
                     enabled: !controller.busy
-                    font.pixelSize: 12
+                    font.pixelSize: theme.fontSize
                     color: root.panelText
-                    selectionColor: "#50545d"
+                    selectionColor: theme.selectionColor
                     selectedTextColor: root.panelText
                     leftPadding: 10
                     rightPadding: 10
@@ -873,15 +1212,15 @@ Item {
                     }
                     background: Rectangle {
                         radius: 6
-                        color: "#1b1d21"
+                        color: theme.inputColor
                         border.width: 1
-                        border.color: savePath.activeFocus ? "#696d76" : "#34363b"
+                        border.color: savePath.activeFocus ? theme.focusColor : theme.borderColor
                     }
                 }
                 Text {
                     text: "Filename template"
                     color: root.secondaryText
-                    font.pixelSize: 12
+                    font.pixelSize: theme.fontSize
                     Layout.topMargin: 10
                 }
                 TextField {
@@ -891,9 +1230,9 @@ Item {
                     Layout.preferredHeight: 32
                     selectByMouse: true
                     enabled: !controller.busy
-                    font.pixelSize: 12
+                    font.pixelSize: theme.fontSize
                     color: root.panelText
-                    selectionColor: "#50545d"
+                    selectionColor: theme.selectionColor
                     selectedTextColor: root.panelText
                     leftPadding: 10
                     rightPadding: 10
@@ -903,9 +1242,9 @@ Item {
                     }
                     background: Rectangle {
                         radius: 6
-                        color: "#1b1d21"
+                        color: theme.inputColor
                         border.width: 1
-                        border.color: nameTemplate.activeFocus ? "#696d76" : "#34363b"
+                        border.color: nameTemplate.activeFocus ? theme.focusColor : theme.borderColor
                     }
                 }
                 Text {
@@ -921,7 +1260,7 @@ Item {
                     Layout.preferredHeight: 1
                     Layout.topMargin: 5
                     Layout.bottomMargin: 6
-                    color: "#292b2f"
+                    color: theme.separatorColor
                 }
                 RowLayout {
                     visible: !controller.recording
@@ -930,7 +1269,7 @@ Item {
                     Text {
                         text: "Copy to clipboard"
                         color: root.secondaryText
-                        font.pixelSize: 12
+                        font.pixelSize: theme.fontSize
                         Layout.fillWidth: true
                     }
                     FlatCheck {
@@ -947,7 +1286,7 @@ Item {
                     Text {
                         text: "Show notifications"
                         color: root.secondaryText
-                        font.pixelSize: 12
+                        font.pixelSize: theme.fontSize
                         Layout.fillWidth: true
                     }
                     FlatCheck {
@@ -965,7 +1304,7 @@ Item {
                     Text {
                         text: "Frame rate"
                         color: root.secondaryText
-                        font.pixelSize: 12
+                        font.pixelSize: theme.fontSize
                         Layout.fillWidth: true
                     }
                     FlatSpin {
@@ -976,6 +1315,25 @@ Item {
                         onValueModified: controller.recordingFps = value
                     }
                 }
+                TextField {
+                    id: videoEditorField
+                    objectName: "videoEditorCommand"
+                    visible: controller.action === "capture" || controller.action === "record"
+                    Layout.fillWidth: true
+                    placeholderText: controller.recording ? "Video editor: losslesscut {}" : "Screenshot editor: satty --filename -"
+                    text: controller.editor
+                    color: root.panelText
+                    placeholderTextColor: root.secondaryText
+                    selectionColor: theme.selectionColor
+                    font.pixelSize: theme.fontSize
+                    enabled: !controller.busy
+                    selectByMouse: true
+                    onEditingFinished: controller.editor = text
+                    background: Rectangle {
+                        color: theme.inputColor; radius: 6
+                        border.color: videoEditorField.activeFocus ? theme.focusColor : theme.borderColor
+                    }
+                }
                 RowLayout {
                     visible: controller.recording
                     Layout.fillWidth: true
@@ -983,7 +1341,7 @@ Item {
                     Text {
                         text: "Delay (seconds)"
                         color: root.secondaryText
-                        font.pixelSize: 12
+                        font.pixelSize: theme.fontSize
                         Layout.fillWidth: true
                     }
                     FlatSpin {
@@ -999,7 +1357,7 @@ Item {
                     text: controller.pickMessage
                     textFormat: Text.PlainText
                     color: root.secondaryText
-                    font.pixelSize: 12
+                    font.pixelSize: theme.fontSize
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                 }
@@ -1008,7 +1366,7 @@ Item {
                     Layout.preferredHeight: 1
                     Layout.topMargin: 8
                     Layout.bottomMargin: 4
-                    color: "#292b2f"
+                    color: theme.separatorColor
                 }
                 RowLayout {
                     Layout.fillWidth: true
@@ -1026,16 +1384,18 @@ Item {
                                 controller.saveDirectory = savePath.text
                             if (controller.filenameTemplate !== nameTemplate.text)
                                 controller.filenameTemplate = nameTemplate.text
+                            if (controller.videoEditor !== videoEditorField.text)
+                                controller.videoEditor = videoEditorField.text
                             sessionSettings.close()
                         }
                         background: Rectangle {
                             radius: 6
-                            color: doneSettings.down ? "#d1d3d6" : doneSettings.hovered ? "#ffffff" : "#e7e8ea"
+                            color: doneSettings.down ? theme.buttonPressedColor : doneSettings.hovered ? theme.buttonHoverColor : theme.buttonColor
                         }
                         contentItem: Text {
                             text: doneSettings.text
-                            color: "#16171a"
-                            font.pixelSize: 12
+                            color: theme.buttonText
+                            font.pixelSize: theme.fontSize
                             font.bold: true
                             horizontalAlignment: Text.AlignHCenter
                             verticalAlignment: Text.AlignVCenter

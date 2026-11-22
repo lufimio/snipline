@@ -67,33 +67,38 @@ private:
   std::unique_ptr<QSocketNotifier> m_notifier;
 };
 
-void configure(QCommandLineParser &parser, const QString &scope = {}) {
+void configure(QCommandLineParser &parser, const QString &scope = {}, bool targetSpecified = false) {
   parser.setApplicationDescription(
       "Snipline — Wayland screenshots and recording");
   parser.addHelpOption();
   parser.addVersionOption();
-  if (scope.isEmpty() || scope == "capture") {
+  if (scope == "control" || scope == "doctor") return;
+  if (scope.isEmpty() || ((scope == "qr" || scope == "ocr") && !targetSpecified))
+    parser.addOption({"file", "Recognize a local image instead of selecting a region (qr/ocr).", "path"});
+  if (scope.isEmpty() || scope == "capture" || scope == "qr" || scope == "ocr") {
     parser.addOption({"live", "Select over the live desktop; acquire pixels only "
                              "after confirmation."});
     parser.addOption(
-        {"frozen", "Select over a frozen frame, overriding config."});
+         {"frozen", "Select over a frozen frame."});
   }
   parser.addOption({"config",
-                    "JSON config (default: ~/.config/snipline/config.json).",
+                    "Load a JSON configuration file.",
                     "path"});
   parser.addOption(
-      {"directory", "Capture directory (resident instance setting).", "path"});
+      {"directory", "Set the screenshot and recording output directories.", "path"});
   if (scope.isEmpty() || scope == "capture" || scope == "daemon")
     parser.addOption(
-        {"format", "png, jpeg, or webp (resident instance setting).", "format"});
+        {"format", "Screenshot format: png, jpeg or webp.", "format"});
   parser.addOption(
-      {"theme", "Data-only JSON theme (resident instance setting).", "path"});
+      {"theme", "Load a JSON theme file.", "path"});
   if (scope.isEmpty() || scope == "record") {
     parser.addOption({"video-format", "Recording format: mp4, webm or gif.", "format"});
-    parser.addOption({"system-audio", "Record system audio (record only)."});
-    parser.addOption({"microphone", "Record microphone (record only)."});
-    parser.addOption({"no-system-audio", "Disable configured system audio (record only)."});
-    parser.addOption({"no-microphone", "Disable configured microphone (record only)."});
+    parser.addOption({"codec", "Video codec: auto, h264, h265, vp8, vp9 or av1.", "codec"});
+    parser.addOption({"encoder", "Encoder: software, auto, vaapi, nvenc or qsv.", "backend"});
+    parser.addOption({"system-audio", "Enable system audio."});
+    parser.addOption({"microphone", "Enable microphone."});
+    parser.addOption({"no-system-audio", "Disable system audio."});
+    parser.addOption({"no-microphone", "Disable microphone."});
   }
 }
 
@@ -103,65 +108,95 @@ bool showCommandHelp(QStringList path) {
   const auto child = path.value(1);
   const QStringList targets{"region", "monitor", "window"};
   const QStringList controls{"pause", "resume", "stop", "discard", "status"};
-  const QStringList roots{"capture", "record", "daemon", "cancel", "quit", "doctor"};
+  const QStringList roots{"capture", "record", "qr", "ocr", "daemon", "cancel", "quit", "doctor"};
   if (path.size() > 2 || (!root.isEmpty() && !roots.contains(root)) ||
-      (!child.isEmpty() && (root != "capture" && root != "record")) ||
+       (!child.isEmpty() && (root != "capture" && root != "record" && root != "qr" && root != "ocr")) ||
       (!child.isEmpty() && !targets.contains(child) && !(root == "record" && controls.contains(child))))
     return false;
   QTextStream out(stdout);
+  const bool recognition = root == "qr" || root == "ocr";
+  const bool recordingControl = root == "record" && controls.contains(child);
+  const bool selecting = root == "capture" || recognition || (root == "record" && !recordingControl);
   if (root.isEmpty()) {
     out << "Usage: snipline <command> [options]\n"
-           "Snipline — Wayland screenshots and recording\n\n"
+           "       snipline [capture-options]  (defaults to capture)\n"
+           "       snipline help <command> [target-or-control]\n\n"
            "Commands:\n"
-           "  capture                 Select a screenshot target (default command)\n"
-           "    region                Capture a region\n"
-           "    monitor               Capture a monitor\n"
-           "    window                Capture an isolated window\n"
-           "  record                  Select a recording target\n"
-           "    region                Record a fixed, single-output region\n"
-           "    monitor               Record a monitor\n"
-           "    window                Record an isolated window\n"
-           "    pause                 Toggle recording between running and paused\n"
-           "    resume                Alias for record pause (also a toggle)\n"
-           "    stop                  Finalize and save the recording\n"
-           "    discard               Discard the recording or its selection\n"
-           "    status                Show recording state and elapsed time as JSON\n"
-           "  daemon                  Start the resident instance\n"
-           "  cancel                  Cancel the active selection or discard recording\n"
+           "  capture [target]        Select and confirm a screenshot\n"
+           "  record [target]         Select and confirm a recording\n"
+           "  record <control>        Control an active recording\n"
+           "  qr [target]             Scan QR/barcodes and copy the first link/payload\n"
+           "  ocr [target]            Recognize text and copy it\n"
+           "  qr|ocr --file <path>    Recognize a saved capture or existing image\n"
+           "  daemon                  Start the resident instance without a selector\n"
+           "  cancel                  Cancel selection/recognition or discard recording\n"
            "  quit                    Finalize recording and quit the resident instance\n"
-           "  doctor                  Print capability diagnostics\n"
-           "  help <command>          Show command-specific help\n\n";
-  } else if ((root == "capture" || root == "record") && child.isEmpty()) {
-    out << "Usage: snipline " << root << " <subcommand> [options]\n\nSubcommands:\n"
-           "  region                  Select a region\n"
-           "  monitor                 Select a monitor\n"
-           "  window                  Select an isolated window\n";
-    if (root == "record")
-      out << "  pause                   Toggle recording between running and paused\n"
-             "  resume                  Alias for pause (also a toggle)\n"
+           "  doctor                  Print JSON capability diagnostics; no capture\n"
+           "  help [command] [child]  Show help without a graphical session\n\n"
+           "Targets: region, monitor, window. All selections require explicit confirmation.\n"
+           "Recording controls: pause, resume, stop, discard, status.\n"
+           "  pause/resume: Toggle recording between running and paused (same toggle).\n\n"
+           "Options below are an overview, not valid with every command. Use\n"
+           "'snipline <command> --help' for applicable options.\n\n";
+  } else if (selecting) {
+    out << "Usage: snipline " << root << (child.isEmpty() ? " [target]" : " " + child) << " [options]\n";
+    if (recognition && child.isEmpty()) out << "       snipline " << root << " --file <path> [startup-options]\n";
+    out << "\nPositional arguments:\n";
+    if (child.isEmpty()) {
+      out << "  target                  region | monitor | window (optional)\n"
+             "    region                Drag/select a rectangle\n"
+             "    monitor               Select one output\n"
+             "    window                Select an isolated application window\n\n";
+    } else {
+      out << "  None after '" << child << "'. This command "
+          << (child == "region" ? "selects a rectangle." : child == "monitor" ? "selects one output." : "selects an isolated application window.")
+          << "\n\n";
+    }
+    if (root == "record" && child.isEmpty())
+      out << "Subcommands:\n"
+             "  Use instead of a target; '<control> --help' shows details.\n"
+             "  pause, resume           Toggle running/paused state (both the same toggle)\n"
              "  stop                    Finalize and save\n"
-             "  discard                 Discard recording or recording selection\n"
-             "  status                  Show recording state as JSON\n";
-    out << "\nOmitting the target uses the configured default.\n\n";
+             "  discard                 Discard without saving\n"
+             "  status                  Print recording state/elapsed time as JSON\n\n";
+    out << "Behavior:\n  ";
+    if (root == "record") {
+      out << "Recording selection is always live.\n"
+             "  Record must fit one output. Reinvoking record shows active controls.\n";
+      out << "  Audio on/off switches conflict for the same source. Codec/container combinations:\n"
+             "    MP4: H.264/H.265/AV1; WebM: VP8/VP9/AV1; GIF: auto/VP8, no audio.\n"
+             "  GIF uses software; hardware is optional and preflighted before recording.\n";
+    } else {
+      out << "--live and --frozen select timing for this request and conflict.\n";
+      if (recognition)
+        out << "  No cursor is captured. Results copy automatically; no results window.\n"
+               "  Links open only through an explicit notification action.\n"
+               "  --file cannot be combined with a target, --live or --frozen.\n";
+    }
+    out << "  Explicitly confirm to save, recognize or start recording; Escape cancels.\n\n";
   } else {
-    out << "Usage: snipline " << root;
-    if (!child.isEmpty()) out << ' ' << child;
-    out << " [options]\n\n";
+    out << "Usage: snipline " << root << (child.isEmpty() ? "" : " " + child) << " [options]\n\n"
+           "Positional arguments: none after the command shown above.\n\n";
     if (child == "pause" || child == "resume")
-      out << "Toggle the active recording: running → paused, paused → running.\n"
-             "Both pause and resume invoke the same toggle. No active recording is an error.\n\n";
-    if (child == "stop") out << "Finalize and save the active recording.\n\n";
-    if (child == "discard") out << "Discard the recording or recording selection without saving.\n\n";
-    if (child == "status") out << "Print JSON recording state, elapsed time and output/error details.\n\n";
+      out << "Toggle running → paused or paused → running. Both use the same toggle.\n"
+             "No active recording is an error.\n\n";
+    else if (child == "stop") out << "Finalize/save the active recording. No active recording is an error.\n\n";
+    else if (child == "discard" || root == "cancel")
+      out << "Cancel selection/recognition or discard recording without saving.\n"
+             "No running instance is a successful no-op.\n\n";
+    else if (child == "status")
+      out << "Print JSON recording state, elapsed time and output/error details.\n"
+             "Without a running instance, reports Idle; does not start one.\n\n";
+    else if (root == "quit") out << "Finalize recording and quit. No instance is a successful no-op.\n\n";
+    else if (root == "daemon") out << "Start the resident instance; no selector opens. Already running: no-op.\n\n";
+    else if (root == "doctor") out << "Print JSON capabilities without requesting pixels or recording streams.\n\n";
   }
-  if (root.isEmpty() || root == "daemon" || root == "capture" ||
-      (root == "record" && !controls.contains(child))) {
-    QCommandLineParser options;
-    configure(options, root);
-    const auto nativeHelp = options.helpText();
-    out << nativeHelp.mid(nativeHelp.indexOf("Options:\n"));
-  } else out << "Options:\n  -h, --help              Show this help\n";
-  out << "\nUse 'snipline help record' or 'snipline record <subcommand> --help' for details.\n";
+  QCommandLineParser options;
+  configure(options, recordingControl || root == "cancel" || root == "quit" ? "control" : root,
+            !child.isEmpty());
+  const auto nativeHelp = options.helpText();
+  out << nativeHelp.mid(nativeHelp.indexOf("Options:\n"));
+  out << "\nHelp: snipline help <command> [target-or-control], or append --help.\n";
   return true;
 }
 } // namespace
@@ -186,15 +221,24 @@ int main(int argc, char **argv) {
   const QStringList recordControls{"pause", "resume", "stop", "discard", "status"};
   const bool recordControl = root == "record" && recordControls.contains(action);
   const QString command = recordControl ? ((action == "pause" || action == "resume") ? "toggle" : action) : root;
+  const bool recognition = command == "qr" || command == "ocr";
   const bool selecting = command == "capture" || (command == "record" && !recordControl);
   const bool control = command == "quit" || command == "cancel" || recordControl;
   if (!help && !parser.isSet("version")) {
-    if (!QStringList{"capture", "record", "daemon", "cancel", "quit", "doctor"}.contains(root))
+    if (!QStringList{"capture", "record", "qr", "ocr", "daemon", "cancel", "quit", "doctor"}.contains(root))
       return fail("Unknown command. See 'snipline --help'.");
-    if (args.size() > 2 || ((root != "capture" && root != "record") && args.size() > 1))
+    if (args.size() > 2 || ((root != "capture" && root != "record" && !recognition) && args.size() > 1))
       return fail("Unexpected arguments. See 'snipline help " + root + "'.");
     if (selecting && !action.isEmpty() && !QStringList{"region", "monitor", "window"}.contains(action))
       return fail("Unknown " + root + " subcommand. See 'snipline help " + root + "'.");
+    if (recognition && !action.isEmpty() && !QStringList{"region", "monitor", "window"}.contains(action))
+      return fail("Recognition targets are region, monitor and window.");
+    if (parser.isSet("file") && (!recognition || !action.isEmpty()))
+      return fail("--file is only valid with qr/ocr without a target.");
+    QCommandLineParser scoped;
+    configure(scoped, recordControl || command == "cancel" || command == "quit" ? "control" : command,
+              !action.isEmpty());
+    if (!scoped.parse(arguments)) return fail(scoped.errorText());
   }
   // Parse first so command names used as option values do not affect whether
   // the process needs a graphical application.
@@ -223,13 +267,18 @@ int main(int argc, char **argv) {
                        !parser.isSet("config"), &configError))
     return fail(configError);
   const QString target = args.value(1, config.target);
+  const QString recognitionTarget = action.isEmpty() ? "region" : action;
+  const QString recognitionFile = parser.isSet("file") ? QFileInfo(parser.value("file")).absoluteFilePath() : QString{};
   if (selecting && target != "region" && target != "monitor" &&
       target != "window")
     return fail("Capture targets are region, monitor and window.");
   if (parser.isSet("live") && parser.isSet("frozen"))
     return fail("--live and --frozen are mutually exclusive.");
-  if (command != "capture" && (parser.isSet("live") || parser.isSet("frozen")))
-    return fail("--live/--frozen are only valid with capture.");
+  if (command != "capture" && !recognition && (parser.isSet("live") || parser.isSet("frozen")))
+    return fail("--live/--frozen are only valid with capture, qr or ocr.");
+  if (parser.isSet("file") && (parser.isSet("live") || parser.isSet("frozen")))
+    return fail("--live/--frozen cannot be used with --file.");
+  const int recognitionLive = parser.isSet("live") ? 1 : parser.isSet("frozen") ? 0 : -1;
   const bool live =
       parser.isSet("live") || (!parser.isSet("frozen") && config.live);
   const auto format = parser.isSet("format") ? parser.value("format").toLatin1()
@@ -237,12 +286,15 @@ int main(int argc, char **argv) {
   if (format != "png" && format != "jpeg" && format != "webp")
     return fail("Format must be png, jpeg, or webp.");
   if ((!selecting || command != "record") && (parser.isSet("video-format") || parser.isSet("system-audio") ||
-      parser.isSet("microphone") || parser.isSet("no-system-audio") || parser.isSet("no-microphone")))
+       parser.isSet("microphone") || parser.isSet("no-system-audio") || parser.isSet("no-microphone") ||
+       parser.isSet("codec") || parser.isSet("encoder")))
     return fail("Recording options are only valid with record.");
   if ((parser.isSet("system-audio") && parser.isSet("no-system-audio")) ||
       (parser.isSet("microphone") && parser.isSet("no-microphone")))
     return fail("Conflicting audio options.");
   const auto videoFormat = parser.isSet("video-format") ? parser.value("video-format") : QString{};
+  const auto codec = parser.value("codec");
+  const auto encoder = parser.value("encoder");
   const int systemAudio = parser.isSet("system-audio") ? 1 : parser.isSet("no-system-audio") ? 0 : -1;
   const int microphone = parser.isSet("microphone") ? 1 : parser.isSet("no-microphone") ? 0 : -1;
   auto bus = QDBusConnection::sessionBus();
@@ -256,6 +308,11 @@ int main(int argc, char **argv) {
     if (command == "daemon")
       return 0;
     QDBusInterface remote(service, objectPath, service, bus);
+    if (recognition) {
+      const QDBusReply<QString> reply = remote.call("RecognizeWithMode", command, recognitionTarget, recognitionFile, recognitionLive);
+      if (!reply.isValid()) return fail(reply.error().message());
+      return reply.value().isEmpty() ? 0 : fail(reply.value());
+    }
     if (command == "quit" || command == "cancel") {
       const auto reply = remote.call(command == "quit" ? "Quit" : "Cancel");
       return reply.type() == QDBusMessage::ErrorMessage
@@ -274,8 +331,8 @@ int main(int argc, char **argv) {
       return reply.value().isEmpty() ? 0 : fail(reply.value());
     }
     if (command == "record") {
-      const QDBusReply<QString> reply = remote.call("RecordConfigured", args.size() > 1 ? target : QString{},
-                                                   videoFormat, systemAudio, microphone);
+      const QDBusReply<QString> reply = remote.call("RecordEncoding", args.size() > 1 ? target : QString{},
+                                                   videoFormat, systemAudio, microphone, codec, encoder);
       if (!reply.isValid()) return fail(reply.error().message());
       return reply.value().isEmpty() ? 0 : fail(reply.value());
     }
@@ -296,6 +353,8 @@ int main(int argc, char **argv) {
   QString directory = parser.value("directory");
   if (directory.isEmpty())
     directory = config.directory;
+  if (parser.isSet("directory"))
+    config.recordingDirectory = QDir(directory).absolutePath();
   snip::Controller controller(QDir(directory).absolutePath(), format,
                               parser.isSet("theme") ? parser.value("theme")
                                                     : config.theme);
@@ -305,9 +364,14 @@ int main(int argc, char **argv) {
                           QDBusConnection::ExportScriptableSlots) ||
       !bus.registerService(service))
     return fail("Could not register the single-instance service. Try again.");
-  if (selecting) {
-    QTimer::singleShot(0, &controller, [&controller, command, target, live, videoFormat, systemAudio, microphone] {
-      const auto error = command == "record" ? controller.RecordConfigured(target, videoFormat, systemAudio, microphone)
+  if (recognition) {
+    QTimer::singleShot(0, &controller, [&controller, command, recognitionTarget, recognitionFile, recognitionLive] {
+      const auto error = controller.RecognizeWithMode(command, recognitionTarget, recognitionFile, recognitionLive);
+      if (!error.isEmpty()) QTextStream(stderr) << error << '\n';
+    });
+  } else if (selecting) {
+    QTimer::singleShot(0, &controller, [&controller, command, target, live, videoFormat, systemAudio, microphone, codec, encoder] {
+      const auto error = command == "record" ? controller.RecordEncoding(target, videoFormat, systemAudio, microphone, codec, encoder)
                                              : controller.CaptureWithMode(target, live);
       if (!error.isEmpty())
         QTextStream(stderr) << error << '\n';

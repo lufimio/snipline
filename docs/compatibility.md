@@ -45,7 +45,7 @@ and is exercised with synthetic fixtures. This is not an end-to-end niri test.
 | Window enumeration/isolation | wlr list + native Hyprland toplevel-export v2; private fake-compositor tested | ext list + stable identifier + grim -T; fake-compositor/command tested, requires advertised ext source/copy protocols |
 | Click-to-select windows | Hyprland mapping + stack/layer-aware IPC hit test; fixture-tested | Native `niri msg --json pick-window`; stable-ID handoff fixture-tested |
 | Portal capture/PipeWire streams | Not implemented | Not implemented |
-| Native recording | Native repeated-capture path + software encoding implemented; synthetic lifecycle/encoding tests, live desktop test pending | Same, requires compatible native capture protocols; live test pending |
+| Native recording | Native repeated-capture path with software/optional hardware encoding; synthetic lifecycle/encoding tests, live desktop test pending | Same, requires compatible native capture protocols; live test pending |
 | Recording audio | PulseAudio/PipeWire-Pulse sources; synthetic mixer tests only | Same |
 | Notification actions under DMS/Noctalia | Not implemented | Not implemented |
 
@@ -89,6 +89,28 @@ isolation correctly or excludes the unmounted overlays from its capture frames.
 
 ## Recording evidence
 
+- Countdown and reopened-control UI tests verify region-centered positioning,
+  persistent outside-region dimming, no automatic pause, explicit pause/resume,
+  hide/reopen, stop and discard. Result-action tests verify file-only save,
+  clipboard-only copy, open-after-save, and no launch after discard.
+- Application PCM acquisition now uses a dedicated threaded PulseAudio loop,
+  float samples and sample-count timestamps; device sources retain their own
+  sample timestamps. Tests check decoded continuous tone windows under a
+  650 ms Qt-thread stall, with AAC/Opus and pause/resume.
+- Per-app capture now negotiates the native output rate before starting the
+  encoder, then normalizes each input to stereo 48 kHz float PCM before mixing.
+  Known-PCM `paplay` fixtures exercise 44.1/48 kHz playback/output combinations;
+  this avoids confounding GStreamer playback-clock reslaving with capture errors.
+  These are synthetic/private-server tests, not general real-device certification.
+- Paused apps have a clocked silence bed and can resume into the same audio
+  track. No other device's audio replaces them. Tests decode initial silence,
+  resumed playback and a closed quiet source. Finalization rejects empty encoded
+  tracks: a paused-source regression previously produced an invalid empty AAC
+  track and is now covered explicitly.
+- An explicitly user-authorized five-second MPD app-only probe produced a
+  decodable stereo 48 kHz AAC MP4 with synthetic black video. This is real-source
+  evidence, not listening validation or real-compositor video validation.
+
 - Real GStreamer pipelines encode synthetic RGBA frames to H.264 MP4 and VP8
   WebM; FFmpeg palette conversion exports a GIF. `ffprobe` verifies decoding,
   stream counts and fixed canvas dimensions. Resized inputs fit the original
@@ -126,8 +148,29 @@ isolation correctly or excludes the unmounted overlays from its capture frames.
   runtime/config/state and disabled hardware profiles isolate the test from the
   user's audio server/devices.
 - The implementation uses bounded native acquisitions and encoder queues,
-  software encoding and explicit single-output region limits. Hardware
-  encoding and cross-output recording are not certified or enabled.
+  software/optional hardware encoding and explicit single-output region limits.
+  Hardware candidates are preflighted with synthetic frames at the actual
+  recording dimensions in a separate helper process before output/audio starts.
+  A probe crash cannot kill the resident. Automatic mode falls back
+  to software; explicit hardware modes fail rather than change backends.
+  Cross-output recording remains disabled.
+- Software H.264, H.265, VP8, VP9 and AV1 are exercised through real encoding,
+  finalization and FFmpeg decoding, including MP4/WebM compatibility. Hardware
+  tests exercise an available backend or explicitly reject an unusable device;
+  unavailable NVENC/QSV plugins are skipped, not claimed as validated.
+  Cancellation during preflight and unsupported-dimension automatic fallback
+  are covered, as is simulated helper-crash fallback. Small hardware HEVC regions
+  are rejected (software is used in auto mode) to avoid a demonstrated VA plugin
+  assertion below 128×128. Native compositor/hardware combinations still need manual checks.
+- On the available Intel VA-API device, H.264 and H.265 synthetic recording,
+  pause/resume, finalization and decoding succeeded using `vah264enc` and
+  `vah265enc`. This validates those encoder paths, not compositor throughput.
+- Selected audio-device/app loss now finalizes existing output instead of
+  discarding it. Tests cover running/paused device errors, initial device/setup
+  failure cleanup, app closure, output moves, identity rejection and private
+  Pulse server disconnection. No replacement device/output is selected.
+  Metadata is periodically revalidated as well as subscribed: a move event can
+  precede the server's updated routing information.
 - Real manual checks are still required for overlap/workspace isolation,
   fractional scales/rotation, throughput, audio source removal, lock signals,
   disk-full behavior and audiovisual synchronization on each compositor.

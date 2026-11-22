@@ -116,9 +116,15 @@ void CoreTest::themesAreTransactional()
 {
     Theme theme;
     QString error;
+    QCOMPARE(theme.tokens().value("background").toString(), QString("#111214"));
+    QCOMPARE(theme.tokens().value("hoverColor").toString(), QString("#24262a"));
+    QVERIFY(theme.load(R"({"secondaryText":"#abc123","buttonText":"#112233","popupColor":"#334455"})", &error));
+    QCOMPARE(theme.tokens().value("secondaryText").toString(), QString("#abc123"));
     QVERIFY(theme.load(R"({"accent":"#ff0000","spacing":12})", &error));
     const auto valid = theme.tokens();
     for (const QByteArray bad : {QByteArray(R"({"accent":"bad-color"})"),
+                                QByteArray(R"({"buttonText":"bad-color"})"),
+                                QByteArray(R"({"secondaryText":14})"),
                                 QByteArray(R"({"spacing":-1})"),
                                 QByteArray(R"({"dimOpacity":2})"),
                                 QByteArray(R"({"fontSize":"16"})"),

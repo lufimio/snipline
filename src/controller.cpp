@@ -1,6 +1,7 @@
 #include "controller.h"
 #include "notification.h"
 #include "core/exporter.h"
+#include "core/editorcommand.h"
 
 #include <LayerShellQt/Window>
 #include <QClipboard>
@@ -17,6 +18,10 @@
 #include <QQmlEngine>
 #include <QScreen>
 #include <QQuickItem>
+#include <QJsonArray>
+#include <QDesktopServices>
+#include <QFileInfo>
+#include <QProcess>
 #include <QUrl>
 #include <QDBusInterface>
 #include <QDBusReply>
@@ -46,12 +51,22 @@ Controller::Controller(QString directory, QByteArray format, QString themePath,
                         SurfaceBarrier *barrier, WindowPicker *picker, VideoRecorder *recorder, AudioSources *audio)
     : QObject(parent), m_audioSources(audio ? audio : new AudioSources(this)),
       m_recorder(recorder ? recorder : new VideoRecorder(this)),
-       m_directory(std::move(directory)),
+       m_directory(std::move(directory)), m_recordDirectory(m_directory),
       m_format(std::move(format)),
       m_capture(capture ? capture : new GrimCapture(this)),
       m_windows(windows ? windows : new WaylandWindows(this)),
       m_barrier(barrier ? barrier : new SurfaceBarrier(this)),
-       m_picker(picker ? picker : new WindowPicker(this)) {
+        m_picker(picker ? picker : new WindowPicker(this)) {
+  connect(&m_recognition, &Recognition::finished, this, &Controller::recognitionFinished);
+  connect(&m_recognitionNotifications, &NotificationActions::openRequested, this, [this](const QUrl &url) {
+    if (!m_sessionLocked) QDesktopServices::openUrl(url);
+  });
+  connect(&m_savedNotifications, &NotificationActions::editRequested, this,
+      [this](const QString &path, const QString &command) {
+        if (m_sessionLocked) return;
+        QString error;
+        if (!launchEditor(command, path, &error)) notify("Could not start editor", error + "\nSaved to " + path);
+      });
   m_transitionTimeout.setSingleShot(true);
   connect(&m_transitionTimeout, &QTimer::timeout, this, [this] {
     fail("Timed out presenting a clean frame for frozen capture.");
@@ -131,14 +146,20 @@ Controller::Controller(QString directory, QByteArray format, QString themePath,
     m_lastRecordingPath = path;
     const auto body = "Saved to " + path + (m_recordWarning.isEmpty() ? QString{} : "\nStopped: " + m_recordWarning);
     const bool quit = m_quitAfterRecording;
+    const auto postAction = m_postRecordingAction;
+    const auto editorCommand = m_config.videoEditor;
     release();
+    openResult(path, postAction, editorCommand);
     qInfo().noquote() << body;
-    notify("Recording saved", body);
+    notifySaved("Recording saved", body, path, editorCommand, false);
     if (quit) QGuiApplication::quit();
   });
   connect(m_recorder, &VideoRecorder::failed, this, [this](quint64 generation, const QString &message) {
     if (!m_recording || generation != m_recordSession.generation()) return;
     m_recordSession.backendFailed(generation, message);
+  });
+  connect(m_recorder, &VideoRecorder::sourceLost, this, [this](quint64 generation, const QString &message) {
+    if (m_recording && generation == m_recordSession.generation()) recordingSourceFailed(message);
   });
   if (!themePath.isEmpty()) {
     QFile file(themePath);
@@ -252,6 +273,7 @@ Controller::Controller(QString directory, QByteArray format, QString themePath,
 }
 
 Controller::~Controller() {
+  m_recognition.clear();
   restoreTransitionSurfaces();
   m_audioTimer.stop();
   m_audioSources->cancel();
@@ -273,11 +295,12 @@ QString Controller::Capture(const QString &mode) {
 }
 
 QString Controller::CaptureWithMode(const QString &mode, bool live) {
-  if (m_recording) return "A recording or recording selection is already active.";
+  if (m_recording) return showRecordingControls();
   if (mode != "region" && mode != "monitor" && mode != "window")
     return QStringLiteral("Capture targets are region, monitor and window.");
   if (m_busy || !m_views.empty())
     return QStringLiteral("A selection is already active.");
+  closeRecognition();
   if (m_capture->requiresWayland() && QGuiApplication::platformName() != "wayland")
     return QStringLiteral("Capture requires the Qt Wayland platform. Set "
                           "QT_QPA_PLATFORM=wayland.");
@@ -370,23 +393,29 @@ bool Controller::selectionOptionsEditable() const {
 }
 void Controller::setAction(const QString &action) {
   if (!selectionOptionsEditable() || action == this->action() ||
-      (action != "capture" && action != "record")) return;
+      (action != "capture" && action != "record" && action != "qr" && action != "ocr")) return;
+  m_recognitionAction = (action == "qr" || action == "ocr") ? action : QString{};
+  m_recognition.prepare(action);
+  if (action == "ocr" && m_recognition.languages().isEmpty()) m_recognition.refreshLanguages();
   m_pickMessage.clear();
   if (action == "record") {
     if (m_sessionLocked) { m_pickMessage = "Cannot record while the session is locked."; emit changed(); return; }
     m_captureLive = m_live;
-    m_recordOptions = {m_directory, m_config.filenameTemplate, m_config.recordingFormat,
+    m_recordOptions = {m_recordDirectory, m_config.filenameTemplate, m_config.recordingFormat,
                        m_config.recordingFps, m_config.systemAudio, m_config.microphone,
-                       m_config.systemAudioDevice, m_config.microphoneDevice, false, {}};
+                        m_config.systemAudioDevice, m_config.microphoneDevice, false, {}};
+    m_recordOptions.codec = m_config.recordingCodec;
+    m_recordOptions.encoder = m_config.recordingEncoder;
     m_recording = true;
     m_live = true;
     for (auto &frame : m_provider->frames) frame.image = {};
     m_provider->window = {};
     m_lastRecordingPath.clear();
     m_lastRecordingError.clear();
+    m_recordWarning.clear();
     m_recordSession.begin(m_mode, m_config.countdown, m_config.maxDuration);
     beginAudioSelection();
-  } else {
+  } else if (m_recording) {
     m_recordSession.discard();
     m_audioTimer.stop();
     m_audioSources->cancel();
@@ -417,9 +446,15 @@ void Controller::setSaveDirectory(const QString &directory) {
     emit changed();
     return;
   }
-  m_directory = QDir(path).absolutePath();
-  m_recordOptions.directory = m_directory;
-  m_config.directory = m_directory;
+  const auto resolved = QDir(path).absolutePath();
+  if (m_recording) {
+    m_recordDirectory = resolved;
+    m_recordOptions.directory = resolved;
+    m_config.recordingDirectory = resolved;
+  } else {
+    m_directory = resolved;
+    m_config.directory = resolved;
+  }
   m_pickMessage.clear();
   emit changed();
 }
@@ -758,6 +793,62 @@ void Controller::selectMonitor(int index) {
   if (m_selection.rect() != rect) m_selection.setRect(rect);
 }
 
+void Controller::setVideoEditor(const QString &command) {
+  if (!selectionOptionsEditable()) return;
+  QString error;
+  if (!validateEditorCommand(command, &error)) { m_pickMessage = error; emit changed(); return; }
+  m_config.videoEditor = command.trimmed();
+  emit changed();
+}
+void Controller::setEditor(const QString &command) {
+  if (m_recording) { setVideoEditor(command); return; }
+  if (!selectionOptionsEditable()) return;
+  QString error;
+  if (!validateEditorCommand(command, &error)) { m_pickMessage = error; emit changed(); return; }
+  m_config.screenshotEditor = command.trimmed();
+  emit changed();
+}
+bool Controller::validateResultAction(const QString &action, bool video) {
+  if (action != "capture" && action != "save" && action != "folder" &&
+      action != "open" && action != "edit" && (video || action != "copy")) return false;
+  const auto command = video ? m_config.videoEditor : m_config.screenshotEditor;
+  if (action == "edit" && command.trimmed().isEmpty()) {
+    m_pickMessage = video ? "Set a video editor command in Session settings first."
+                         : "Set a screenshot editor command in Session settings first.";
+    emit changed();
+    return false;
+  }
+  return true;
+}
+void Controller::confirmWithAction(const QString &action) {
+  if (!canConfirm() || !validateResultAction(action, m_recording)) return;
+  if (m_recording) m_postRecordingAction = action;
+  else m_captureDisposition = action;
+  confirm();
+}
+void Controller::stopWithAction(const QString &action) {
+  if (!m_recording || !validateResultAction(action, true)) return;
+  m_postRecordingAction = action;
+  Stop();
+}
+void Controller::openResult(const QString &path, const QString &action, const QString &editorCommand) {
+  if (m_sessionLocked) return;
+  if (action == "folder" || action == "open") {
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(
+            action == "folder" ? QFileInfo(path).absolutePath() : path)))
+      notify("Could not open saved file", "Saved to " + path + "; no associated application could be launched.");
+  } else if (action == "edit") {
+    QString error;
+    if (!launchEditor(editorCommand, path, &error))
+      notify("Could not start editor", error + "\nSaved to " + path);
+  }
+}
+void Controller::notifySaved(const QString &title, const QString &body, const QString &path,
+                             const QString &editorCommand, bool image) {
+  if (!m_config.notifications) return;
+  m_savedNotifications.showEditor(title, body, m_config.notificationTimeout,
+      path, m_sessionLocked ? QString{} : editorCommand, image);
+}
 void Controller::confirm() {
   if (!canConfirm()) return;
   if (m_recording) {
@@ -848,35 +939,151 @@ void Controller::commit() {
 }
 
 void Controller::save(const QImage &image) {
+  if (!m_recognitionAction.isEmpty()) {
+    const auto kind = m_recognitionAction;
+    const QImage input = image;
+    release();
+    m_recognition.startImage(kind, input);
+    return;
+  }
+  if (m_captureDisposition == "copy") {
+    auto *clipboard = QGuiApplication::clipboard();
+    if (!clipboard) { fail("Clipboard is unavailable."); return; }
+    clipboard->setImage(image);
+    if (!clipboard->mimeData()->hasImage()) { fail("Could not copy the screenshot."); return; }
+    release();
+    notify("Screenshot copied", "Copied to the clipboard without saving a file.");
+    return;
+  }
   const auto saved = saveImage(image, m_directory, m_format, m_config.filenameTemplate);
   if (!saved.error.isEmpty()) {
     fail(saved.error);
     return;
   }
   auto *clipboard = QGuiApplication::clipboard();
-  if (clipboard && m_config.clipboard)
+  const bool shouldCopy = m_config.clipboard && m_captureDisposition == "capture";
+  if (clipboard && shouldCopy)
     clipboard->setImage(image);
   const bool copied =
-      m_config.clipboard && clipboard && clipboard->mimeData() && clipboard->mimeData()->hasImage();
+      shouldCopy && clipboard && clipboard->mimeData() && clipboard->mimeData()->hasImage();
   const QString body =
-      !m_config.clipboard ? QStringLiteral("Saved to %1").arg(saved.path) : copied
+      !shouldCopy ? QStringLiteral("Saved to %1").arg(saved.path) : copied
           ? QStringLiteral("Copied and saved to %1").arg(saved.path)
           : QStringLiteral("Saved to %1, but copying failed.").arg(saved.path);
   qInfo().noquote() << body;
+  const auto postAction = m_captureDisposition;
+  const auto editorCommand = m_config.screenshotEditor;
+  m_lastCapture = saved.path;
   release();
-  notify((copied || !m_config.clipboard) ? QStringLiteral("Screenshot saved")
+  openResult(saved.path, postAction, editorCommand);
+  notifySaved((copied || !shouldCopy) ? QStringLiteral("Screenshot saved")
                 : QStringLiteral("Clipboard error"),
-          body, saved.path);
+          body, saved.path, editorCommand, true);
+}
+
+QString Controller::Recognize(const QString &kind, const QString &target, const QString &file) {
+  return RecognizeWithMode(kind, target, file, -1);
+}
+QString Controller::RecognizeWithMode(const QString &kind, const QString &target, const QString &file, int live) {
+  if (kind != "qr" && kind != "ocr") return "Recognition actions are qr and ocr.";
+  if (live < -1 || live > 1) return "Capture timing must be -1 (config default), 0 (frozen) or 1 (live).";
+  if (!file.isEmpty() && live != -1) return "Live/frozen timing cannot be used with an existing image.";
+  if (m_sessionLocked) return "Cannot recognize images while the session is locked.";
+  if (m_recording || m_busy || !m_views.empty()) return "A capture or recording is already active.";
+  if (!file.isEmpty()) {
+    closeRecognition();
+    m_recognition.startFile(kind, QFileInfo(file).absoluteFilePath());
+    return {};
+  }
+  const auto error = CaptureWithMode(target.isEmpty() ? "region" : target, live < 0 ? m_config.live : bool(live));
+  if (!error.isEmpty()) return error;
+  m_recognitionAction = kind;
+  m_recognition.prepare(kind);
+  if (kind == "ocr" && m_recognition.languages().isEmpty()) m_recognition.refreshLanguages();
+  emit changed();
+  return {};
+}
+void Controller::recognitionFinished(bool success) {
+  if (m_sessionLocked) return;
+  const bool ocr = m_recognition.kind() == "ocr";
+  const QString title = ocr ? "Text recognition" : "QR / barcodes";
+  QString body;
+  QUrl url;
+  if (!success) body = m_recognition.error();
+  else if (ocr) {
+    body = m_recognition.text().trimmed().isEmpty() ? "No text found. Clipboard unchanged."
+        : copyRecognition() ? "Recognized text copied to the clipboard." : "Could not copy recognized text.";
+  } else {
+    const auto codes = m_recognition.codes();
+    if (codes.isEmpty()) body = "No codes found. Clipboard unchanged.";
+    else {
+      int index = 0;
+      for (int i = 0; i < codes.size(); ++i) {
+        const auto candidate = codeUrl(i);
+        if (!candidate.isEmpty()) { index = i; url = candidate; break; }
+      }
+      const bool copied = copyRecognition(index);
+      body = copied ? (url.isEmpty() ? "Code payload copied to the clipboard." : "Link copied to the clipboard.")
+                    : "Could not copy the code payload.";
+      if (codes.size() > 1) body += QString(" %1 codes found; copied the first web link or, if none, the first payload.").arg(codes.size());
+    }
+  }
+  if (m_config.notifications) m_recognitionNotifications.show(title, body, m_config.notificationTimeout, url);
+}
+void Controller::closeRecognition() {
+  m_recognition.clear();
+}
+bool Controller::copyRecognition(int index) {
+  if (m_sessionLocked || m_recognition.busy()) return false;
+  QString text;
+  if (index < 0 && m_recognition.kind() == "ocr") text = m_recognition.text();
+  else {
+    const auto codes = m_recognition.codes();
+    if (index < 0 || index >= codes.size()) return false;
+    text = codes[index].toMap().value("text").toString();
+  }
+  auto *clipboard = QGuiApplication::clipboard();
+  if (!clipboard || text.isEmpty()) return false;
+  clipboard->setText(text);
+  return clipboard->text() == text;
+}
+QUrl Controller::codeUrl(int index) const {
+  const auto codes = m_recognition.codes();
+  if (m_recognition.busy() || index < 0 || index >= codes.size()) return {};
+  const auto code = codes[index].toMap();
+  if (code.value("binary").toBool()) return {};
+  const auto text = code.value("text").toString();
+  for (const auto ch : text) if (!ch.isPrint() || ch.isSpace()) return {};
+  const QUrl url(text, QUrl::StrictMode);
+  if (!url.isValid() || url.host().isEmpty() || !url.userInfo().isEmpty() ||
+      (url.scheme() != "https" && url.scheme() != "http")) return {};
+  return url;
+}
+bool Controller::canOpenCode(int index) const { return !m_sessionLocked && !codeUrl(index).isEmpty(); }
+bool Controller::openCode(int index) {
+  const auto url = codeUrl(index);
+  return !m_sessionLocked && !url.isEmpty() && QDesktopServices::openUrl(url);
 }
 
 void Controller::cancel() {
+  closeRecognition();
   if (m_recording) m_recordSession.discard();
   release();
 }
 
 void Controller::Cancel() { cancel(); }
+void Controller::hideRecordingControls() {
+  if (!m_recordControls) return;
+  m_recordControls = false;
+  hideOverlays();
+  emit changed();
+}
 
 void Controller::release() {
+  m_recognitionAction.clear();
+  m_captureDisposition = "capture";
+  m_postRecordingAction.clear();
+  m_recordControls = false;
   restoreTransitionSurfaces();
   m_audioTimer.stop();
   m_audioSources->cancel();
@@ -889,7 +1096,6 @@ void Controller::release() {
   m_recording = false;
   m_encoderStarted = false;
   m_quitAfterRecording = false;
-  m_recordWarning.clear();
   clearWindowHover();
   m_picker->cancel();
   m_geometryTimer.stop();
@@ -948,13 +1154,16 @@ void Controller::notify(const QString &title, const QString &body, const QString
 }
 
 QString Controller::Record(const QString &mode, const QString &format, bool systemAudioValue, bool microphoneValue) {
+  if (m_recording) return showRecordingControls();
   if (m_sessionLocked) return "Cannot start recording while the session is locked.";
   if (m_busy || !m_views.empty() || m_recording) return "A capture or recording is already active.";
   RecordingOptions options;
-  options.directory = m_directory;
+  options.directory = m_recordDirectory;
   options.filenameTemplate = m_config.filenameTemplate;
   options.format = format.isEmpty() ? m_config.recordingFormat : format;
   options.fps = m_config.recordingFps;
+  options.codec = m_config.recordingCodec;
+  options.encoder = m_config.recordingEncoder;
   options.systemAudio = systemAudioValue;
   options.microphone = microphoneValue;
   options.systemAudioDevice = m_config.systemAudioDevice;
@@ -969,10 +1178,23 @@ QString Controller::Record(const QString &mode, const QString &format, bool syst
   m_recordOptions = options;
   m_lastRecordingPath.clear();
   m_lastRecordingError.clear();
+  m_recordWarning.clear();
   m_recordSession.begin(mode, m_config.countdown, m_config.maxDuration);
   beginAudioSelection();
   emit changed();
   return {};
+}
+QString Controller::RecordEncoding(const QString &mode, const QString &format, int systemAudio, int microphone,
+                                   const QString &codec, const QString &encoder) {
+  if (m_recording) return showRecordingControls();
+  const auto previousCodec = m_config.recordingCodec;
+  const auto previousEncoder = m_config.recordingEncoder;
+  if (!codec.isEmpty()) m_config.recordingCodec = codec;
+  if (!encoder.isEmpty()) m_config.recordingEncoder = encoder;
+  const auto result = RecordConfigured(mode, format, systemAudio, microphone);
+  m_config.recordingCodec = previousCodec;
+  m_config.recordingEncoder = previousEncoder;
+  return result;
 }
 QString Controller::RecordConfigured(const QString &mode, const QString &format, int systemAudio, int microphone) {
   if (systemAudio < -1 || systemAudio > 1 || microphone < -1 || microphone > 1)
@@ -1100,6 +1322,23 @@ void Controller::setRecordingFormat(const QString &format) {
   if (!recordingOptionsEditable() || (format != "mp4" && format != "webm" && format != "gif")) return;
   m_recordOptions.format = format;
   m_config.recordingFormat = format;
+  if (!recordingCodecs().contains(m_recordOptions.codec)) m_recordOptions.codec = "auto";
+  if (format == "gif" && m_recordOptions.encoder != "software" && m_recordOptions.encoder != "auto")
+    m_recordOptions.encoder = "software";
+  m_config.recordingCodec = m_recordOptions.codec;
+  m_config.recordingEncoder = m_recordOptions.encoder;
+  emit changed();
+}
+void Controller::setRecordingCodec(const QString &codec) {
+  if (!recordingOptionsEditable() || !recordingCodecs().contains(codec)) return;
+  m_config.recordingCodec = m_recordOptions.codec = codec;
+  emit changed();
+}
+void Controller::setRecordingEncoder(const QString &encoder) {
+  if (!recordingOptionsEditable() ||
+      !QStringList{"software", "auto", "vaapi", "nvenc", "qsv"}.contains(encoder)) return;
+  if (recordingFormat() == "gif" && encoder != "software" && encoder != "auto") return;
+  m_config.recordingEncoder = m_recordOptions.encoder = encoder;
   emit changed();
 }
 void Controller::setSystemAudio(bool enabled) {
@@ -1118,12 +1357,31 @@ QString Controller::recordingState() const {
   return QString::fromLatin1(QMetaEnum::fromType<RecordingSession::State>()
                                 .valueToKey(int(m_recordSession.state())));
 }
+QString Controller::showRecordingControls() {
+  if (m_sessionLocked) return "Cannot show recording controls while the session is locked.";
+  const auto state = m_recordSession.state();
+  if (state == RecordingSession::State::Paused || state == RecordingSession::State::Recording) {
+    m_recordControls = true;
+  } else if (state != RecordingSession::State::Selecting &&
+             state != RecordingSession::State::Countdown) {
+    return "Recording is changing state; try again shortly.";
+  }
+  emit changed();
+  for (const auto &view : m_views) {
+    view->show();
+    view->requestActivate();
+  }
+  return {};
+}
 QString Controller::Status() const {
   return QString::fromUtf8(QJsonDocument(QJsonObject{
       {"recording", m_recording}, {"state", recordingState()},
       {"target", m_mode}, {"format", m_recordOptions.format},
+      {"codec", m_recordOptions.codec}, {"encoder", m_recordOptions.encoder},
+      {"selectedCodec", m_recorder->selectedCodec()}, {"selectedEncoder", m_recorder->selectedEncoder()},
       {"elapsedMs", m_recordSession.elapsedMs()},
       {"countdown", m_recordSession.countdownRemaining()},
+      {"audio", QJsonArray::fromVariantList(m_recorder->audioDiagnostics())},
       {"path", m_lastRecordingPath}, {"error", m_lastRecordingError},
       {"warning", m_recordWarning}}).toJson(QJsonDocument::Compact));
 }
@@ -1134,6 +1392,7 @@ QString Controller::Pause() {
   return {};
 }
 QString Controller::Resume() {
+  if (pausePending()) return "A pause/resume change is already pending.";
   if (!m_recording || m_recordSession.state() != RecordingSession::State::Paused)
     return "No paused recording to resume.";
   m_recordSession.resume();
@@ -1200,9 +1459,17 @@ void Controller::recordingSourceFailed(const QString &message) {
 }
 void Controller::SessionLocked() {
   m_sessionLocked = true;
+  m_recognitionNotifications.invalidate();
+  m_savedNotifications.invalidate();
+  closeRecognition();
+  if (!m_recognitionAction.isEmpty()) release();
   if (m_recording) {
+    m_recordControls = false;
+    m_postRecordingAction.clear(); // Never start a viewer/editor behind the lock screen.
+    hideOverlays();
     m_recordWarning = "Session locked.";
     Stop();
+    emit changed();
   }
 }
 void Controller::ScreenSaverActive(bool active) {

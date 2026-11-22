@@ -8,8 +8,24 @@
 namespace snip {
 
 Theme::Theme(QObject *parent)
-    : QObject(parent), m_tokens{{"background", "#20232b"},
-                                {"foreground", "#f3f4f6"},
+    : QObject(parent), m_tokens{{"background", "#111214"},
+                                {"foreground", "#f1f1f2"},
+                                {"secondaryText", "#a5a8ae"},
+                                {"hoverColor", "#24262a"},
+                                {"selectedColor", "#2b2e34"},
+                                {"popupColor", "#1a1b1f"},
+                                {"borderColor", "#34353a"},
+                                {"mutedBorder", "#74777e"},
+                                {"inputColor", "#1b1d21"},
+                                {"focusColor", "#696d76"},
+                                {"selectionColor", "#50545d"},
+                                {"separatorColor", "#292b2f"},
+                                {"buttonColor", "#f0f0f2"},
+                                {"buttonHoverColor", "#e1e2e5"},
+                                {"buttonPressedColor", "#d1d3d6"},
+                                {"buttonText", "#131416"},
+                                {"disabledColor", "#34363b"},
+                                {"disabledText", "#8f939b"},
                                 {"accent", "#83b4ff"},
                                 {"dimColor", "#000000"},
                                 {"dimOpacity", 0.45},
@@ -18,9 +34,9 @@ Theme::Theme(QObject *parent)
                                 {"monitorDimColor", "#000000"},
                                 {"monitorDimOpacity", 0.25},
                                 {"fontFamily", "sans-serif"},
-                                {"fontSize", 14},
+                                {"fontSize", 12},
                                 {"spacing", 10},
-                                {"radius", 12},
+                                {"radius", 8},
                                 {"outlineWidth", 2},
                                 {"handleSize", 8}} {}
 
@@ -43,8 +59,7 @@ bool Theme::load(const QByteArray &json, QString *error) {
       return fail(QStringLiteral("Unknown theme token: %1").arg(it.key()));
     const auto &key = it.key();
     const auto value = it.value();
-    if (key == "background" || key == "foreground" || key == "accent" ||
-        key == "dimColor" || key == "windowDimColor" || key == "monitorDimColor") {
+    if (next.value(key).metaType().id() == QMetaType::QString && key != "fontFamily") {
       if (!value.isString() || !QColor::isValidColorName(value.toString()))
         return fail(QStringLiteral("Invalid color: %1").arg(key));
     } else if (key == "fontFamily") {

@@ -5,18 +5,33 @@
 namespace snip {
 struct Config {
   QString filenameTemplate = DefaultFilenameTemplate;
-  QString directory, theme;
+  QString directory, recordingDirectory, theme;
   QByteArray format = "png";
   QString target = "region";
-  bool live = false, clipboard = true, notifications = true;
+  bool live = true, clipboard = true, notifications = true;
   int notificationTimeout = 5000;
-  QVariantMap keybindings{{"confirm", QStringList{"Return", "Enter"}},
+  QVariantMap keybindings{{"confirm", QStringList{"Return", "Enter", "Space"}},
                          {"cancel", QStringList{"Escape"}},
-                         {"region", QStringList{"Ctrl+1"}},
-                         {"monitor", QStringList{"Ctrl+2"}},
-                         {"window", QStringList{"Ctrl+3"}}};
+                         {"live", QStringList{"Ctrl+L"}},
+                         {"cursor", QStringList{"Ctrl+Shift+C"}},
+                         {"save", QStringList{"Ctrl+S"}},
+                         {"copy", QStringList{"Ctrl+C"}},
+                         {"open", QStringList{"Ctrl+O"}},
+                         {"folder", QStringList{"Ctrl+Shift+O"}},
+                         {"edit", QStringList{"Ctrl+E"}},
+                         {"capture", QStringList{"Ctrl+1"}},
+                         {"record", QStringList{"Ctrl+2"}},
+                         {"qr", QStringList{"Ctrl+3"}},
+                         {"ocr", QStringList{"Ctrl+4"}},
+                         {"region", QStringList{"Shift+1"}},
+                         {"monitor", QStringList{"Shift+2"}},
+                         {"window", QStringList{"Shift+3"}}};
   QString recordingFormat = "mp4";
+  QString recordingCodec = "auto", recordingEncoder = "auto";
+  QString screenshotEditor, videoEditor;
+  QStringList ocrLanguages{"eng"};
   int recordingFps = 30, countdown = 3, maxDuration = 3600;
+  // Session-only audio preferences; these are not JSON configuration keys.
   bool systemAudio = false, microphone = false;
   QString systemAudioDevice = "@DEFAULT_MONITOR@", microphoneDevice;
   Config();

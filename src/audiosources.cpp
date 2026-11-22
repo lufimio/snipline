@@ -95,8 +95,10 @@ QVariantList AudioSources::parse(const QByteArray &devices, const QByteArray &in
     if (label.isEmpty()) label = QString("Application stream %1").arg(index);
     if (!media.isEmpty() && media != label) label += " — " + media;
     if (input["mute"].toBool()) label += " (muted)";
+    if (input["corked"].toBool()) label += " (paused)";
     result.append(QVariantMap{{"id", id}, {"kind", "application"}, {"index", index},
         {"identity", identity}, {"label", label}, {"icon", "audio"},
+        {"corked", input["corked"].toBool()},
         {"pid", properties.value("application.process.id").toString()},
         {"appId", properties.value("application.id").toString()},
         {"binary", properties.value("application.process.binary").toString()},

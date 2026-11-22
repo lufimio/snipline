@@ -5,6 +5,9 @@
 #include <QDBusConnectionInterface>
 #include <QDBusReply>
 #include <QElapsedTimer>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QImageWriter>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -107,7 +110,9 @@ int doctor() {
   for (const auto *element :
         {"pipewiresrc", "appsrc", "pulsesrc", "audiomixer", "x264enc", "h264parse",
          "mp4mux", "vp8enc", "webmmux", "opusenc", "avenc_aac",
-        "vaapih264enc", "vah264enc", "nvh264enc"})
+         "x265enc", "h265parse", "vp9enc", "av1enc", "av1parse",
+         "vaapih264enc", "vah264enc", "vah265enc", "vavp8enc", "vavp9enc", "vaav1enc",
+         "nvh264enc", "nvh265enc", "nvav1enc", "qsvh264enc", "qsvh265enc", "qsvav1enc", "qsvvp9enc"})
     codecs[element] = hasElement(element);
   QJsonArray formats;
   for (const auto &format : QImageWriter::supportedImageFormats())
@@ -155,12 +160,25 @@ int doctor() {
                                   {"frozenMonitor", true},
                                    {"live", true},
                                    {"window", true},
-                                  {"portal", false},
-                                   {"recording", true}}},
+                                   {"portal", false},
+                                   {"qr", true}, {"ocr", true},
+                                    {"recording", true}}},
+       {"recognition", QJsonObject{{"barcodeBackend", "ZXing-C++ in separate worker"},
+                                   {"workerFound", QFileInfo(QDir(QCoreApplication::applicationDirPath())
+                                                              .filePath("snipline-recognize")).isExecutable()},
+                                   {"ocrBackend", "asynchronous Tesseract CLI; installed language selection"},
+                                   {"automaticLinkOpening", false}, {"networkTransmission", false}}},
        {"recording", QJsonObject{{"source", "repeated native capture; no desktop fallback for windows"},
-                                 {"crossOutput", false}, {"hardwareEncoding", false},
+                                  {"crossOutput", false}, {"hardwareEncoding", true},
+                                  {"hardwareProbe", "separate synthetic probe process before recording; software fallback only in auto mode"},
+                                  {"encoderProbeFound", QFileInfo(QDir(QCoreApplication::applicationDirPath())
+                                                                     .filePath("snipline-encoder-probe")).isExecutable()},
+                                  {"encoders", QJsonArray{"software", "auto", "vaapi", "nvenc", "qsv"}},
+                                  {"codecs", QJsonArray{"h264", "h265", "vp8", "vp9", "av1"}},
                                  {"formats", QJsonArray{"mp4", "webm", "gif"}},
-                                 {"audio", "PulseAudio/PipeWire-Pulse; separate system/microphone sources"}}},
+                                  {"audio", "PulseAudio/PipeWire-Pulse devices and verified application streams"},
+                                  {"applicationAudioResampling", "native output-rate float PCM; each input normalized to 48 kHz"},
+                                  {"pausedApplicationAudio", "clocked silence; no replacement audio device"}}},
       {"note", "Protocol advertisement and installed encoders are not "
                "end-to-end validation. No pixels or streams were requested."}};
   QTextStream(stdout) << QJsonDocument(report).toJson(QJsonDocument::Indented);

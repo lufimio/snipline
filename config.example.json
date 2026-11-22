@@ -1,27 +1,80 @@
 {
-  "directory": "~/Pictures/Snipline",
-  "format": "png",
   "filenameTemplate": "Snipline_{datetime:yyyy-MM-dd_HH-mm-ss-zzz}_{uuid}",
-  "target": "region",
-  "live": false,
   "clipboard": true,
   "notifications": true,
   "notificationTimeout": 5000,
-  "keybindings": {
-    "confirm": ["Return", "Enter"],
-    "cancel": ["Escape"],
-    "region": ["Ctrl+1"],
-    "monitor": ["Ctrl+2"],
-    "window": ["Ctrl+3"]
+  "screenshots": {
+    "directory": "~/Pictures/Snipline",
+    "editor": "",
+    "target": "region",
+    "live": true,
+    "format": "png"
   },
   "recording": {
+    "directory": "~/Videos/Snipline",
+    "editor": "",
     "format": "mp4",
+    "codec": "auto",
+    "encoder": "auto",
     "fps": 30,
     "countdown": 3,
-    "maxDuration": 3600,
-    "systemAudio": false,
-    "microphone": false,
-    "systemAudioDevice": "@DEFAULT_MONITOR@",
-    "microphoneDevice": ""
+    "maxDuration": 3600
+  },
+  "ocr": {
+    "languages": [
+      "eng"
+    ]
+  },
+  "keybindings": {
+    "confirm": [
+      "Return",
+      "Enter",
+      "Space"
+    ],
+    "cancel": [
+      "Escape"
+    ],
+    "live": [
+      "Ctrl+L"
+    ],
+    "cursor": [
+      "Ctrl+Shift+C"
+    ],
+    "save": [
+      "Ctrl+S"
+    ],
+    "copy": [
+      "Ctrl+C"
+    ],
+    "open": [
+      "Ctrl+O"
+    ],
+    "folder": [
+      "Ctrl+Shift+O"
+    ],
+    "edit": [
+      "Ctrl+E"
+    ],
+    "capture": [
+      "Ctrl+1"
+    ],
+    "record": [
+      "Ctrl+2"
+    ],
+    "qr": [
+      "Ctrl+3"
+    ],
+    "ocr": [
+      "Ctrl+4"
+    ],
+    "region": [
+      "Shift+1"
+    ],
+    "monitor": [
+      "Shift+2"
+    ],
+    "window": [
+      "Shift+3"
+    ]
   }
 }

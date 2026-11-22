@@ -159,6 +159,8 @@ void GrimCapture::nextFrame() {
   }
   run(
       QStringLiteral("grim"),
+      // Deliberately omit grim's -c: recognition and native captures must not
+      // composite cursor pixels into the source image.
       {"-o", output.name, "-s", QString::number(output.scale, 'g', 12), "-t",
        "ppm", "-"},
       [this, output](QByteArray bytes, QString error) {

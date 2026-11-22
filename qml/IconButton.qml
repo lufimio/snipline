@@ -5,6 +5,7 @@ ToolButton {
     id: control
     property string glyph: ""
     property string tip: ""
+    property real glyphRotation: 0
     implicitWidth: 29
     implicitHeight: 29
     hoverEnabled: true
@@ -14,14 +15,16 @@ ToolButton {
     ToolTip.text: tip
     background: Rectangle {
         radius: 6
-        color: control.checked ? "#2b2e34" : control.hovered ? "#24262a" : "transparent"
+        color: control.checked ? theme.selectedColor : control.hovered ? theme.hoverColor : "transparent"
     }
     contentItem: Item {
         Glyph {
             anchors.centerIn: parent
             width: 17; height: 17
             name: control.glyph
-            color: "#f1f1f2"
+            rotation: control.glyphRotation
+            Behavior on rotation { NumberAnimation { duration: 140 } }
+            color: theme.foreground
             opacity: control.enabled ? (control.checked ? 1 : 0.82) : 0.32
         }
     }

@@ -6,11 +6,22 @@
 #include <QScreen>
 #include <QDir>
 #include <QSvgRenderer>
+#include <QDesktopServices>
+#include <QClipboard>
 #include <wayland-client.h>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <ZXing/MultiFormatWriter.h>
+#include <ZXing/BitMatrix.h>
 
 using namespace snip;
+class ResultUrls : public QObject {
+    Q_OBJECT
+public:
+    QList<QUrl> urls;
+public slots:
+    void open(const QUrl &url) { urls.append(url); }
+};
 
 class FakePixels : public CaptureBackend {
 public:
@@ -144,7 +155,678 @@ class UiTest : public QObject {
         return nullptr;
     }
 private slots:
+    void arrowActionShortcutsMatchMenuActions()
+    {
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier);
+        Config config;
+        config.notifications = false;
+        controller.configure(config);
+        ResultUrls urls;
+        QDesktopServices::setUrlHandler("file", &urls, "open");
+        const auto clearHandler = qScopeGuard([] { QDesktopServices::unsetUrlHandler("file"); });
+        for (const auto &action : {"save", "copy", "open", "folder"}) {
+            QVERIFY(controller.Capture("region").isEmpty());
+            auto *view = selectorView();
+            QVERIFY(view);
+            view->requestActivate();
+            QTest::qWait(30);
+            const auto before = QDir(directory.path()).entryList(QDir::Files).size();
+            QGuiApplication::clipboard()->clear();
+            QTest::keyClick(view, Qt::Key_S, Qt::ControlModifier); // No selection: disabled.
+            QCOMPARE(QDir(directory.path()).entryList(QDir::Files).size(), before);
+            selectionModel()->setRect({10, 10, 100, 100});
+            const QString value(action);
+            QTest::keyClick(view, value == "save" ? Qt::Key_S : value == "copy" ? Qt::Key_C : Qt::Key_O,
+                value == "folder" ? Qt::ControlModifier | Qt::ShiftModifier : Qt::ControlModifier);
+            QTRY_COMPARE(QDir(directory.path()).entryList(QDir::Files).size(), before + (value == "copy" ? 0 : 1));
+            if (value == "copy") QVERIFY(!QGuiApplication::clipboard()->image().isNull());
+            else QVERIFY(QGuiApplication::clipboard()->image().isNull());
+        }
+        QCOMPARE(urls.urls.size(), 2);
+        QVERIFY(urls.urls.first().toLocalFile().endsWith(".png"));
+        QCOMPARE(urls.urls.last().toLocalFile(), directory.path());
+    }
+    void recordingArrowShortcutsWaitForFinalization()
+    {
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        FakeRecorder recorder;
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier, nullptr, &recorder);
+        ResultUrls urls;
+        QDesktopServices::setUrlHandler("file", &urls, "open");
+        const auto clearHandler = qScopeGuard([] { QDesktopServices::unsetUrlHandler("file"); });
+        QVERIFY(controller.Record("monitor", "mp4", false, false).isEmpty());
+        controller.setCountdownSeconds(0);
+        auto *view = selectorView();
+        QVERIFY(view);
+        view->requestActivate();
+        QTest::qWait(30);
+        QTest::keyClick(view, Qt::Key_E, Qt::ControlModifier);
+        QCOMPARE(recorder.starts, 0);
+        QVERIFY(controller.pickMessage().contains("editor"));
+        QTest::keyClick(view, Qt::Key_S, Qt::ControlModifier);
+        barrier.acknowledge();
+        pixels.finish(Qt::green);
+        QCOMPARE(recorder.starts, 1);
+        QCOMPARE(controller.recordingResultAction(), "save");
+        QVERIFY(controller.Capture("monitor").isEmpty()); // Bring controls back.
+        view = selectorView();
+        view->requestActivate();
+        QTest::qWait(30);
+        QTest::keyClick(view, Qt::Key_O, Qt::ControlModifier | Qt::ShiftModifier);
+        QTRY_COMPARE(controller.recordingState(), "Finalizing");
+        QCOMPARE(recorder.stops, 1);
+        QVERIFY(urls.urls.isEmpty());
+        recorder.finish(directory.filePath("recording.mp4"));
+        QTRY_COMPARE(urls.urls.size(), 1);
+        QCOMPARE(urls.urls.first().toLocalFile(), directory.path());
+    }
+    void toolTargetAndTimingShortcutsDoNotConfirm()
+    {
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        FakePicker picker;
+        FakeRecorder recorder;
+        FakeAudio audio;
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier, &picker, &recorder, &audio);
+        Config config;
+        config.live = false;
+        config.notifications = false;
+        controller.configure(config);
+        QVERIFY(controller.CaptureWithMode("region", false).isEmpty());
+        auto *view = selectorView();
+        QVERIFY(view);
+        view->requestActivate();
+        QTest::qWait(50);
+        QVERIFY(!view->rootObject()->findChild<QObject *>("copyToClipboard"));
+        QVERIFY(!view->rootObject()->property("captureCursorVisible").toBool());
+        QTest::keyClick(view, Qt::Key_C, Qt::ControlModifier | Qt::ShiftModifier);
+        QTRY_VERIFY(view->rootObject()->property("captureCursorVisible").toBool());
+        QTest::keyClick(view, Qt::Key_3, Qt::ControlModifier);
+        QTRY_COMPARE(controller.action(), "qr");
+        QTest::keyClick(view, Qt::Key_C, Qt::ControlModifier | Qt::ShiftModifier);
+        QVERIFY(view->rootObject()->property("captureCursorVisible").toBool());
+        QTest::keyClick(view, Qt::Key_4, Qt::ControlModifier);
+        QTRY_COMPARE(controller.action(), "ocr");
+        QTest::keyClick(view, Qt::Key_1, Qt::ControlModifier);
+        QTRY_COMPARE(controller.action(), "capture");
+        QTest::keyClick(view, Qt::Key_L, Qt::ControlModifier);
+        QTRY_VERIFY(controller.live());
+        QTest::keyClick(view, Qt::Key_2, Qt::ControlModifier);
+        QTRY_COMPARE(controller.action(), "record");
+        QVERIFY(!view->rootObject()->property("recordCursorVisible").toBool());
+        QTest::keyClick(view, Qt::Key_C, Qt::ControlModifier | Qt::ShiftModifier);
+        QTRY_VERIFY(view->rootObject()->property("recordCursorVisible").toBool());
+        QTest::keyClick(view, Qt::Key_L, Qt::ControlModifier);
+        QVERIFY(controller.live()); // Recording selection must remain live.
+        QTest::keyClick(view, Qt::Key_1, Qt::ControlModifier);
+        QTRY_COMPARE(controller.action(), "capture");
+        QTest::keyClick(view, Qt::Key_2, Qt::ShiftModifier);
+        QTRY_COMPARE(controller.mode(), "monitor");
+        QTest::keyClick(view, Qt::Key_3, Qt::ShiftModifier);
+        QTRY_COMPARE(controller.mode(), "window");
+        QTest::keyClick(view, Qt::Key_1, Qt::ShiftModifier);
+        QTRY_COMPARE(controller.mode(), "region");
+        QTest::keyClick(view, Qt::Key_L, Qt::ControlModifier);
+        QTRY_COMPARE(barrier.starts, 1);
+        barrier.acknowledge();
+        pixels.finish(Qt::green);
+        QVERIFY(!controller.live());
+        QCOMPARE(selectorView(), view);
+        QCOMPARE(recorder.starts, 0);
+        QVERIFY(QDir(directory.path()).entryList(QDir::Files).isEmpty());
+        selectionModel()->setRect({10, 10, 100, 100});
+        QVERIFY(controller.canConfirm());
+        QTest::keyClick(view, Qt::Key_Space);
+        QTRY_COMPARE(QDir(directory.path()).entryList(QDir::Files).size(), 1);
+    }
+    void recognitionTimingOverridesRespectResidentConfig()
+    {
+        QTemporaryDir directory;
+        for (const auto &kind : {"qr", "ocr"}) {
+            for (bool defaultLive : {false, true}) {
+                for (int timing : {-1, 0, 1}) {
+                    FakePixels pixels;
+                    FakeWindows windows;
+                    FakeBarrier barrier;
+                    Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier);
+                    Config config;
+                    config.live = defaultLive;
+                    config.notifications = false;
+                    controller.configure(config);
+                    QVERIFY(controller.RecognizeWithMode(kind, "region", {}, timing).isEmpty());
+                    const bool live = timing < 0 ? defaultLive : bool(timing);
+                    QCOMPARE(controller.live(), live);
+                    QCOMPARE(pixels.liveStarts, live ? 1 : 0);
+                    QCOMPARE(pixels.frozenStarts, live ? 0 : 1);
+                    controller.cancel();
+                }
+            }
+        }
+    }
+    void recognitionFromSelectionAndImages()
+    {
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        FakePicker picker;
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier, &picker);
+        Config config;
+        config.live = false; // This test exercises the frozen selection path.
+        config.notifications = false;
+        controller.configure(config);
+        QVERIFY(controller.Recognize("qr", "monitor", {}).isEmpty());
+        QCOMPARE(controller.action(), "qr");
+        auto *selectionView = selectorView();
+        QVERIFY(selectionView);
+        selectionView->rootObject()->setProperty("optionsExpanded", true);
+        QVERIFY(!selectionView->rootObject()->findChild<QQuickItem *>("showCursor")->isVisible());
+        controller.selectMonitor(0);
+        QVERIFY(controller.canConfirm());
+        QGuiApplication::clipboard()->setText("Keep existing clipboard");
+        controller.confirm();
+        for (auto *window : QGuiApplication::topLevelWindows()) QVERIFY(!window->isVisible());
+        auto *recognition = qobject_cast<Recognition *>(controller.recognition());
+        QVERIFY(recognition);
+        QTRY_VERIFY(!recognition->busy());
+        QCOMPARE(recognition->state(), "Done");
+        QVERIFY(recognition->codes().isEmpty());
+        QCOMPARE(QGuiApplication::clipboard()->text(), "Keep existing clipboard");
+        QVERIFY(QDir(directory.path()).entryList(QDir::Files).isEmpty());
+
+        ResultUrls urls;
+        QDesktopServices::setUrlHandler("https", &urls, "open");
+        const auto bits = ZXing::MultiFormatWriter(ZXing::BarcodeFormat::QRCode).setMargin(4)
+                              .encode(L"https://example.com/explicit-only", 320, 320);
+        QImage image(bits.width(), bits.height(), QImage::Format_RGB32);
+        image.fill(Qt::white);
+        for (int y = 0; y < bits.height(); ++y)
+            for (int x = 0; x < bits.width(); ++x) if (bits.get(x, y)) image.setPixelColor(x, y, Qt::black);
+        const auto path = directory.filePath("saved.png");
+        QVERIFY(image.save(path));
+        QGuiApplication::clipboard()->setText("Replace automatically");
+        QVERIFY(controller.Recognize("qr", {}, path).isEmpty());
+        QTRY_VERIFY(!recognition->busy());
+        QCOMPARE(recognition->codes().size(), 1);
+        QCOMPARE(QGuiApplication::clipboard()->text(), "https://example.com/explicit-only");
+        QCOMPARE(urls.urls.size(), 0);
+        QVERIFY(controller.canOpenCode(0));
+        QVERIFY(!controller.canOpenCode(-1));
+        QVERIFY(controller.copyRecognition(0));
+        QCOMPARE(QGuiApplication::clipboard()->text(), "https://example.com/explicit-only");
+        QVERIFY(controller.openCode(0));
+        QCOMPARE(urls.urls.size(), 1);
+        for (const auto &payload : {QString("file:///etc/passwd"), QString("javascript:alert(1)"),
+                                    QString("https://user:password@example.com/"), QString("https://example.com/ white")}) {
+            const auto unsafeBits = ZXing::MultiFormatWriter(ZXing::BarcodeFormat::QRCode).setMargin(4)
+                                        .encode(payload.toStdWString(), 320, 320);
+            QImage unsafeImage(unsafeBits.width(), unsafeBits.height(), QImage::Format_RGB32);
+            unsafeImage.fill(Qt::white);
+            for (int y = 0; y < unsafeBits.height(); ++y)
+                for (int x = 0; x < unsafeBits.width(); ++x)
+                    if (unsafeBits.get(x, y)) unsafeImage.setPixelColor(x, y, Qt::black);
+            recognition->startImage("qr", unsafeImage);
+            QTRY_VERIFY(!recognition->busy());
+            QCOMPARE(recognition->codes().size(), 1);
+            QVERIFY(!controller.canOpenCode(0));
+            QVERIFY(!controller.openCode(0));
+            QCOMPARE(urls.urls.size(), 1);
+        }
+        QDesktopServices::unsetUrlHandler("https");
+        controller.SessionLocked();
+        for (auto *window : QGuiApplication::topLevelWindows()) QVERIFY(!window->isVisible());
+        QVERIFY(!recognition->hasInput());
+        QVERIFY(recognition->codes().isEmpty());
+        QVERIFY(!controller.openCode(0));
+        QVERIFY(!controller.Recognize("qr", "region", path).isEmpty());
+        controller.ScreenSaverActive(false);
+        QVERIFY(controller.Capture("monitor").isEmpty());
+        controller.selectMonitor(0);
+        controller.confirmWithAction("save");
+        QVERIFY(!controller.lastCapture().isEmpty());
+        QVERIFY(controller.Recognize("ocr", "monitor", {}).isEmpty());
+        auto *ocrView = selectorView();
+        QVERIFY(ocrView);
+        ocrView->rootObject()->setProperty("optionsExpanded", true);
+        QTRY_VERIFY(!recognition->busy());
+        auto *languages = ocrView->rootObject()->findChild<QQuickItem *>("ocrLanguageSelector");
+        QVERIFY(languages);
+        QVERIFY(languages->isVisible());
+        QVERIFY(!ocrView->rootObject()->findChild<QQuickItem *>("showCursor")->isVisible());
+        QCOMPARE(languages->width(), qreal(146));
+        QCOMPARE(languages->height(), qreal(29));
+        QCOMPARE(languages->findChildren<QObject *>("dropdownArrow").size(), 1);
+        if (!recognition->languages().isEmpty()) {
+            const auto language = recognition->languages().first();
+            const auto before = recognition->selectedLanguages();
+            auto *popup = ocrView->rootObject()->findChild<QObject *>("ocrLanguagesPopup");
+            QVERIFY(popup);
+            QVERIFY(QMetaObject::invokeMethod(popup, "open"));
+            QTRY_VERIFY(popup->property("opened").toBool());
+            QTest::qWait(100);
+            const auto anchor = languages->mapToScene({0, 0});
+            const qreal px = popup->property("panelX").toReal(), py = popup->property("panelY").toReal();
+            const qreal pw = popup->property("panelWidth").toReal(), ph = popup->property("panelHeight").toReal();
+            QVERIFY(px >= 12 && px + pw <= ocrView->width() - 12);
+            QVERIFY(py >= 12 && py + ph <= ocrView->height() - 12);
+            QVERIFY(py + ph <= anchor.y() - 8 || py >= anchor.y() + languages->height() + 8);
+            QQuickItem *choice = nullptr;
+            QTRY_VERIFY((choice = visualItem(ocrView->contentItem(), "ocrLanguage_" + language)));
+            QTRY_VERIFY(choice->isVisible() && choice->width() > 0 && choice->height() > 0);
+            QTest::mouseClick(ocrView, Qt::LeftButton, Qt::NoModifier,
+                choice->mapToScene({choice->width() / 2, choice->height() / 2}).toPoint());
+            QTRY_COMPARE(recognition->selectedLanguages().contains(language), !before.contains(language));
+            QVERIFY(popup->property("visible").toBool()); // Multi-select stays open.
+            recognition->toggleLanguage(language);
+            QCOMPARE(recognition->selectedLanguages(), before);
+            QVERIFY(QMetaObject::invokeMethod(popup, "close"));
+        }
+        controller.selectMonitor(0);
+        QVERIFY(controller.canConfirm());
+        controller.confirm();
+        QTRY_VERIFY_WITH_TIMEOUT(!recognition->busy(), 70000);
+        for (auto *window : QGuiApplication::topLevelWindows()) QVERIFY(!window->isVisible());
+        QVERIFY(controller.Recognize("ocr", {}, controller.lastCapture()).isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(!recognition->busy(), 70000);
+        QCOMPARE(recognition->sourceFile(), controller.lastCapture());
+        // Exercise the controller's completion path without depending on installed OCR models.
+        recognition->setText("Automatically copied OCR result");
+        emit recognition->finished(true);
+        QCOMPARE(QGuiApplication::clipboard()->text(), "Automatically copied OCR result");
+        recognition->setText("Edited OCR result");
+        QCOMPARE(QGuiApplication::clipboard()->text(), "Automatically copied OCR result");
+        QVERIFY(controller.copyRecognition());
+        QCOMPARE(QGuiApplication::clipboard()->text(), "Edited OCR result");
+        controller.closeRecognition();
+        for (auto *window : QGuiApplication::topLevelWindows()) QVERIFY(!window->isVisible());
+        QVERIFY(!recognition->hasInput());
+    }
     void initTestCase() { QQuickStyle::setStyle("Basic"); }
+    void sessionLockFinalizesWithoutLaunchingSelectedResultAction()
+    {
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        FakeRecorder recorder;
+        ResultUrls urls;
+        QDesktopServices::setUrlHandler("file", &urls, "open");
+        const auto clearHandler = qScopeGuard([] { QDesktopServices::unsetUrlHandler("file"); });
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier, nullptr, &recorder);
+        QVERIFY(controller.Record("monitor", "mp4", false, false).isEmpty());
+        controller.setCountdownSeconds(0);
+        controller.confirmWithAction("open");
+        barrier.acknowledge();
+        pixels.finish(Qt::green);
+        controller.SessionLocked();
+        QCOMPARE(controller.recordingState(), QString("Finalizing"));
+        recorder.finish(directory.filePath("locked.mp4"));
+        QVERIFY(urls.urls.isEmpty());
+        QVERIFY(controller.Status().contains("Session locked."));
+    }
+    void nativeRecordingRevocationAndLayoutErrorsFinalizeWithoutFallback_data()
+    {
+        QTest::addColumn<QString>("message");
+        QTest::newRow("revocation") << QString("Native capture permission revoked");
+        QTest::newRow("layout") << QString("Output layout changed");
+    }
+    void nativeRecordingRevocationAndLayoutErrorsFinalizeWithoutFallback()
+    {
+        QFETCH(QString, message);
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        FakeRecorder recorder;
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier, nullptr, &recorder);
+        QVERIFY(controller.Record("monitor", "mp4", false, false).isEmpty());
+        controller.setCountdownSeconds(0);
+        controller.confirm();
+        barrier.acknowledge();
+        pixels.finish(Qt::green);
+        emit pixels.failed(message);
+        QCOMPARE(controller.recordingState(), QString("Finalizing"));
+        QCOMPARE(recorder.stops, 1);
+        const auto acquisitions = pixels.acquisitions;
+        QTest::qWait(100);
+        QCOMPARE(pixels.acquisitions, acquisitions);
+        QVERIFY(controller.Status().contains(message));
+        recorder.finish(directory.filePath("recovered.mp4"));
+        QVERIFY(controller.Status().contains("recovered.mp4"));
+        QVERIFY(controller.Status().contains(message));
+    }
+    void audioSourceLossFinalizesInsteadOfDiscardingOrSubstituting()
+    {
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        FakeRecorder recorder;
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier, nullptr, &recorder);
+        QVERIFY(controller.Record("monitor", "mp4", false, false).isEmpty());
+        controller.setCountdownSeconds(0);
+        controller.confirm();
+        barrier.acknowledge();
+        pixels.finish(Qt::green);
+        QCOMPARE(controller.recordingState(), QString("Recording"));
+        QVERIFY(controller.Pause().isEmpty());
+        const auto pausedElapsed = controller.recordingElapsedMs();
+        QTest::qWait(50);
+        QCOMPARE(controller.recordingElapsedMs(), pausedElapsed);
+        emit recorder.sourceLost(recorder.token, "Selected audio device removed");
+        QCOMPARE(controller.recordingState(), QString("Finalizing"));
+        QCOMPARE(recorder.stops, 1);
+        QVERIFY(controller.Status().contains("Selected audio device removed"));
+        const auto path = directory.filePath("partial.mp4");
+        recorder.finish(path);
+        QVERIFY(!controller.recording());
+        QVERIFY(controller.Status().contains("partial.mp4"));
+        QVERIFY(controller.Status().contains("Selected audio device removed"));
+    }
+    void recordingCodecAndEncoderSelectionAreContainerAwareAndLockAtConfirmation()
+    {
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        FakeRecorder recorder;
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier, nullptr, &recorder);
+        QVERIFY(controller.Record("monitor", "mp4", false, false).isEmpty());
+        auto *root = selectorView()->rootObject();
+        root->setProperty("optionsExpanded", true);
+        QVERIFY(root->findChild<QObject *>("videoCodecSelector"));
+        QVERIFY(root->findChild<QObject *>("videoEncoderSelector"));
+        controller.setRecordingCodec("h265");
+        QCOMPARE(controller.recordingCodec(), QString("h265"));
+        controller.setRecordingFormat("webm");
+        QCOMPARE(controller.recordingCodec(), QString("auto"));
+        QVERIFY(controller.recordingCodecs().contains("vp9"));
+        QVERIFY(!controller.recordingCodecs().contains("h264"));
+        controller.setRecordingCodec("vp9");
+        controller.setRecordingFormat("mp4");
+        QCOMPARE(controller.recordingCodec(), QString("auto"));
+        controller.setRecordingCodec("h264");
+        controller.setRecordingEncoder("auto");
+        controller.setCountdownSeconds(0);
+        controller.confirm();
+        barrier.acknowledge();
+        pixels.finish(Qt::green);
+        QCOMPARE(recorder.starts, 1);
+        QCOMPARE(recorder.options.codec, QString("h264"));
+        QCOMPARE(recorder.options.encoder, QString("auto"));
+        controller.setRecordingCodec("av1");
+        controller.setRecordingEncoder("software");
+        QCOMPARE(controller.recordingCodec(), QString("h264"));
+        QCOMPARE(controller.recordingEncoder(), QString("auto"));
+        controller.cancel();
+    }
+    void screenshotAndRecordingDirectoriesAreIndependent()
+    {
+        QTemporaryDir directory;
+        const auto screenshots = directory.filePath("screenshots");
+        const auto videos = directory.filePath("videos");
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        FakeRecorder recorder;
+        Controller controller(screenshots, "png", {}, nullptr, &pixels, &windows, &barrier, nullptr, &recorder);
+        Config config;
+        config.recordingDirectory = videos;
+        config.countdown = 0;
+        config.notifications = false;
+        controller.configure(config);
+        QVERIFY(controller.Capture("monitor").isEmpty());
+        QCOMPARE(controller.saveDirectory(), screenshots);
+        controller.confirmWithAction("save");
+        QCOMPARE(QDir(screenshots).entryList(QDir::Files).size(), 1);
+        QVERIFY(!QFileInfo::exists(videos));
+        QVERIFY(controller.CaptureWithMode("monitor", true).isEmpty());
+        controller.setAction("record");
+        QCOMPARE(controller.saveDirectory(), videos);
+        const auto changedVideos = directory.filePath("other-videos");
+        controller.setSaveDirectory(changedVideos);
+        controller.setAction("capture");
+        QCOMPARE(controller.saveDirectory(), screenshots);
+        controller.setAction("record");
+        QCOMPARE(controller.saveDirectory(), changedVideos);
+        controller.confirm();
+        barrier.acknowledge();
+        pixels.finish(Qt::green);
+        QCOMPARE(recorder.starts, 1);
+        QCOMPARE(recorder.options.directory, changedVideos);
+        QCOMPARE(QDir(screenshots).entryList(QDir::Files).size(), 1);
+        controller.cancel();
+    }
+    void errorsFloatAboveToolbarAndFadeWithoutClearingBackendState()
+    {
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier);
+        QVERIFY(controller.Capture("region").isEmpty());
+        selectionModel()->setRect({10, 10, 100, 100});
+        auto *root = selectorView()->rootObject();
+        auto *toast = root->findChild<QQuickItem *>("errorToast");
+        auto *bar = root->findChild<QQuickItem *>("multiTierToolbar");
+        QVERIFY(toast && bar);
+        QVERIFY(!toast->isVisible());
+        QTest::qWait(30);
+        const auto barHeight = bar->height();
+        emit pixels.failed("Synthetic capture error");
+        QTRY_COMPARE(toast->opacity(), 1.0);
+        QCOMPARE(toast->property("message").toString(), QString("Synthetic capture error"));
+        QCOMPARE(bar->height(), barHeight);
+        QVERIFY(toast->y() + toast->height() <= bar->y() - 8);
+        QVERIFY(!controller.canConfirm());
+        QTest::qWait(4600);
+        QVERIFY(toast->isVisible());
+        // Unrelated controller updates must not restart the notification timer.
+        controller.configure(Config{});
+        QTRY_COMPARE_WITH_TIMEOUT(toast->opacity(), 0.0, 1200);
+        QVERIFY(!toast->isVisible());
+        QCOMPARE(controller.error(), QString("Synthetic capture error"));
+        QVERIFY(!controller.canConfirm());
+    }
+    void splitButtonsAndResultMenusHaveConsistentGeometry()
+    {
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        FakeRecorder recorder;
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier, nullptr, &recorder);
+        QVERIFY(controller.Capture("region").isEmpty());
+        selectionModel()->setRect({10, 10, 100, 100});
+        auto *view = selectorView();
+        QVERIFY(view);
+        auto *root = view->rootObject();
+        auto *lens = root->findChild<QQuickItem *>("lensAction");
+        QVERIFY(lens && lens->isVisible() && !lens->isEnabled());
+        QCOMPARE(lens->property("glyph").toString(), QString("lens"));
+        for (const auto &action : {"capture", "record"}) {
+            controller.setAction(action);
+            QTest::qWait(30);
+            auto *group = root->findChild<QQuickItem *>("confirmSplitButton");
+            auto *button = root->findChild<QQuickItem *>("confirmAction");
+            auto *arrow = root->findChild<QQuickItem *>("advancedCapture");
+            QVERIFY(group && button && arrow && arrow->isVisible());
+            QCOMPARE(group->width(), button->width() + arrow->width());
+            QCOMPARE(button->mapToItem(group, {button->width(), 0}).x(),
+                     arrow->mapToItem(group, {0, 0}).x());
+            auto *divider = root->findChild<QQuickItem *>("splitButtonDivider");
+            QVERIFY(divider && divider->height() < group->height() / 2);
+            auto *menu = root->findChild<QObject *>("advancedResultMenu");
+            QVERIFY(menu);
+            QVERIFY(QMetaObject::invokeMethod(arrow, "clicked"));
+            QTRY_VERIFY(menu->property("visible").toBool());
+            QQuickItem *upload = nullptr;
+            QTRY_VERIFY((upload = visualItem(view->contentItem(), "resultAction_upload")));
+            QVERIFY(upload->isVisible() && !upload->isEnabled());
+            for (const auto &name : {"resultAction_open", "resultAction_upload"}) {
+                auto *row = visualItem(view->contentItem(), name);
+                QVERIFY(row);
+                 for (const auto &part : {"resultItemIcon", "resultItemLabel", "resultItemShortcut"}) {
+                    auto *item = row->findChild<QQuickItem *>(part);
+                    QVERIFY(item);
+                    const auto center = item->mapToItem(row, {item->width() / 2, item->height() / 2});
+                    QVERIFY(qAbs(center.y() - row->height() / 2) <= 0.5);
+                }
+            }
+            QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+        }
+    }
+    void captureResultActionsAndDisabledArrow()
+    {
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier);
+        ResultUrls urls;
+        QDesktopServices::setUrlHandler("file", &urls, "open");
+        const auto clearHandler = qScopeGuard([] { QDesktopServices::unsetUrlHandler("file"); });
+        for (const auto &action : {"copy", "save", "folder", "open"}) {
+            QVERIFY(controller.Capture("region").isEmpty());
+            auto *root = selectorView()->rootObject();
+            auto *arrow = root->findChild<QQuickItem *>("advancedCapture");
+            QVERIFY(arrow);
+            QVERIFY(!arrow->isEnabled());
+            selectionModel()->setRect({10, 10, 100, 100});
+            QVERIFY(arrow->isEnabled());
+            QGuiApplication::clipboard()->clear();
+            const auto before = QDir(directory.path()).entryList(QDir::Files).size();
+            controller.confirmWithAction(action);
+            const auto after = QDir(directory.path()).entryList(QDir::Files).size();
+            QCOMPARE(after - before, QString(action) == "copy" ? 0 : 1);
+            if (QString(action) == "copy") QVERIFY(!QGuiApplication::clipboard()->image().isNull());
+            else QVERIFY(QGuiApplication::clipboard()->image().isNull());
+        }
+        QCOMPARE(urls.urls.size(), 2);
+        QCOMPARE(urls.urls.first().toLocalFile(), directory.path());
+        QVERIFY(urls.urls.last().toLocalFile().endsWith(".png"));
+    }
+    void recordingResultActionsWaitForSaveAndDiscardNeverOpens()
+    {
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        FakeRecorder recorder;
+        ResultUrls urls;
+        QDesktopServices::setUrlHandler("file", &urls, "open");
+        const auto clearHandler = qScopeGuard([] { QDesktopServices::unsetUrlHandler("file"); });
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier, nullptr, &recorder);
+        QVERIFY(controller.Record("monitor", "mp4", false, false).isEmpty());
+        controller.setCountdownSeconds(0);
+        controller.confirmWithAction("edit"); // Editor must be explicitly configured.
+        QCOMPARE(controller.recordingState(), QString("Selecting"));
+        QVERIFY(controller.pickMessage().contains("editor"));
+        controller.confirmWithAction("folder");
+        barrier.acknowledge();
+        pixels.finish(Qt::green);
+        QCOMPARE(controller.recordingState(), QString("Recording"));
+        QVERIFY(urls.urls.isEmpty());
+        QCOMPARE(controller.recordingResultAction(), QString("folder"));
+        QVERIFY(controller.Capture("monitor").isEmpty());
+        auto *root = selectorView()->rootObject();
+        QVERIFY(!root->findChild<QObject *>("recordingResultButton"));
+        auto *finish = root->findChild<QQuickItem *>("recordingStop");
+        QVERIFY(finish);
+        QVERIFY(QMetaObject::invokeMethod(finish, "clicked"));
+        QCOMPARE(recorder.stops, 1);
+        QCOMPARE(controller.recordingState(), QString("Finalizing"));
+        QVERIFY(urls.urls.isEmpty());
+        recorder.finish(directory.filePath("test.mp4"));
+        QCOMPARE(urls.urls.size(), 1);
+        QCOMPARE(urls.urls.first().toLocalFile(), directory.path());
+        QVERIFY(controller.Record("monitor", "mp4", false, false).isEmpty());
+        controller.setCountdownSeconds(0);
+        controller.confirmWithAction("open");
+        barrier.acknowledge();
+        pixels.finish(Qt::green);
+        controller.cancel();
+        recorder.finish(directory.filePath("discarded.mp4"));
+        QCOMPARE(urls.urls.size(), 1);
+    }
+    void countdownAndReopenedRecordingControls()
+    {
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        FakeRecorder recorder;
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier, nullptr, &recorder);
+        QVERIFY(controller.Record("region", "webm", false, false).isEmpty());
+        selectionModel()->setRect({100, 100, 200, 120});
+        controller.setCountdownSeconds(3);
+        auto *view = selectorView();
+        QVERIFY(view);
+        auto *root = view->rootObject();
+        controller.confirm();
+        auto *countdown = root->findChild<QQuickItem *>("recordingCountdown");
+        auto *number = root->findChild<QQuickItem *>("countdownNumber");
+        QVERIFY(countdown && number);
+        QVERIFY(countdown->isVisible());
+        QCOMPARE(countdown->x() + countdown->width() / 2,
+                 root->property("rx").toDouble() + root->property("rw").toDouble() / 2);
+        QCOMPARE(countdown->y() + countdown->height() / 2,
+                 root->property("ry").toDouble() + root->property("rh").toDouble() / 2);
+        auto *dimming = root->findChild<QQuickItem *>("selectionDimming");
+        QVERIFY(dimming && dimming->isVisible());
+        QVERIFY(!root->property("selecting").toBool());
+        QCOMPARE(root->property("targetRect").toRectF(), QRectF(100, 100, 200, 120));
+        QCOMPARE(number->property("text").toString(), QString("3"));
+        QTRY_COMPARE_WITH_TIMEOUT(number->property("text").toString(), QString("2"), 1600);
+        QTRY_COMPARE_WITH_TIMEOUT(number->property("text").toString(), QString("1"), 1600);
+        QCOMPARE(pixels.acquisitions, 0);
+        QTRY_COMPARE_WITH_TIMEOUT(barrier.starts, 1, 1600);
+        QVERIFY(barrier.allHidden);
+        barrier.acknowledge();
+        pixels.finish(Qt::green);
+        QCOMPARE(controller.recordingState(), QString("Recording"));
+        QVERIFY(!selectorView());
+        QVERIFY(controller.Capture("region").isEmpty());
+        QCOMPARE(controller.recordingState(), QString("Recording"));
+        QCOMPARE(selectorView(), view);
+        QVERIFY(controller.recordingControls());
+        QVERIFY(dimming->isVisible());
+        QCOMPARE(root->property("targetRect").toRectF(), QRectF(100, 100, 200, 120));
+        QVERIFY(root->findChild<QQuickItem *>("recordingControls")->isVisible());
+        auto *pauseResume = root->findChild<QQuickItem *>("recordingPauseResume");
+        QVERIFY(pauseResume);
+        QCOMPARE(pauseResume->property("glyph").toString(), QString("pause"));
+        QVERIFY(QMetaObject::invokeMethod(pauseResume, "clicked"));
+        QCOMPARE(controller.recordingState(), QString("Paused"));
+        QCOMPARE(pauseResume->property("glyph").toString(), QString("play"));
+        QVERIFY(QMetaObject::invokeMethod(pauseResume, "clicked"));
+        QCOMPARE(controller.recordingState(), QString("Recording"));
+        QCOMPARE(selectorView(), view);
+        QCOMPARE(barrier.starts, 1); // No hide/pause barrier on reopening or resume.
+        auto *hide = root->findChild<QQuickItem *>("recordingHideControls");
+        QVERIFY(QMetaObject::invokeMethod(hide, "clicked"));
+        QVERIFY(!selectorView());
+        QCOMPARE(controller.recordingState(), QString("Recording"));
+        QVERIFY(controller.Record("window", "mp4", true, true).isEmpty());
+        QCOMPARE(controller.recordingState(), QString("Recording"));
+        QCOMPARE(recorder.starts, 1);
+        auto *stop = root->findChild<QQuickItem *>("recordingStop");
+        QVERIFY(QMetaObject::invokeMethod(stop, "clicked"));
+        QCOMPARE(recorder.stops, 1);
+        QCOMPARE(controller.recordingState(), QString("Finalizing"));
+        controller.cancel();
+        QVERIFY(!controller.recording());
+        QVERIFY(QDir(directory.path()).entryList(QDir::Files).isEmpty());
+    }
     void customSvgAssetsArePackaged()
     {
         QDir icons(":/qml/icons");
@@ -217,7 +899,16 @@ private slots:
         QVERIFY(settingsButton && settingsButton->parentItem() == tier);
         QVERIFY(capture->property("text").toString().isEmpty());
         QVERIFY(tier->mapToScene({0, 0}).y() >= actions->mapToScene({0, actions->height()}).y() - 1);
-        QVERIFY(!root->findChild<QQuickItem *>("qrAction")->isEnabled());
+        QVERIFY(root->findChild<QQuickItem *>("qrAction")->isEnabled());
+        QVERIFY(root->findChild<QQuickItem *>("ocrAction")->isEnabled());
+        controller.setAction("qr");
+        QCOMPARE(controller.action(), "qr");
+        QCOMPARE(selectorView(), view);
+        QCOMPARE(selection->rect(), QRectF(100, 100, 120, 80));
+        controller.setAction("ocr");
+        QCOMPARE(controller.action(), "ocr");
+        QCOMPARE(selectorView(), view);
+        controller.setAction("capture");
         QVERIFY(root->findChild<QQuickItem *>("imageFormatSelector")->isVisible());
         QVERIFY(!root->findChild<QQuickItem *>("videoFormatSelector")->isVisible());
         QTest::mouseClick(view, Qt::LeftButton, Qt::NoModifier,
@@ -486,7 +1177,10 @@ private slots:
         pixels.finish(Qt::red);
         QCOMPARE(recorder.starts, 1);
         QCOMPARE(recorder.firstFrame.size(), QSize(640, 480));
+        QVERIFY(controller.Capture("monitor").isEmpty());
+        QVERIFY(selectorView());
         controller.SessionLocked();
+        QVERIFY(!selectorView());
         QCOMPARE(recorder.stops, 1);
         QCOMPARE(controller.recordingState(), QString("Finalizing"));
         recorder.finish(directory.filePath("monitor.webm"));

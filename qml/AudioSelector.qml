@@ -23,7 +23,7 @@ ToolButton {
     }
     background: Rectangle {
         radius: 6
-        color: control.hovered || dropdown.visible ? "#24262a" : "transparent"
+        color: control.hovered || dropdown.visible ? theme.hoverColor : "transparent"
     }
     // Same 146px hover surface and text/chevron alignment as FlatCombo.
     contentItem: Item {
@@ -34,8 +34,8 @@ ToolButton {
             text: control.controller.selectedAudioCount + " selected"
             horizontalAlignment: Text.AlignRight
             verticalAlignment: Text.AlignVCenter
-            color: "#f1f1f2"
-            font.pixelSize: 12
+            color: theme.foreground
+            font.pixelSize: theme.fontSize
             elide: Text.ElideRight
         }
         Glyph {
@@ -45,7 +45,7 @@ ToolButton {
             anchors.verticalCenter: parent.verticalCenter
             width: 12; height: 12
             name: "chevron"
-            color: "#a5a8ae"
+            color: theme.secondaryText
             rotation: dropdown.visible ? 180 : 0
             Behavior on rotation { NumberAnimation { duration: 140 } }
         }
@@ -121,8 +121,8 @@ ToolButton {
                 width: dropdown.panelWidth
                 height: dropdown.panelHeight
                 radius: 8
-                color: "#131416"
-                border.color: "#41434a"
+                color: theme.background
+                border.color: theme.borderColor
                 border.width: 1
                 clip: true
 

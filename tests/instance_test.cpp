@@ -19,7 +19,14 @@ private slots:
             {"--help"}, {"help", "record"}, {"record", "--help"},
             {"record", "pause", "--help"}, {"record", "resume", "--help"},
             {"record", "stop", "--help"}, {"capture", "--help"},
-            {"help", "capture", "window"}, {"--help-all"}};
+            {"help", "capture", "window"}, {"qr", "--help"}, {"ocr", "--help"},
+            {"help", "ocr", "region"}, {"capture", "region", "--help"},
+            {"capture", "monitor", "--help"}, {"qr", "window", "--help"},
+            {"qr", "monitor", "--help"}, {"ocr", "window", "--help"},
+            {"record", "region", "--help"}, {"record", "monitor", "--help"},
+            {"record", "window", "--help"}, {"record", "discard", "--help"},
+            {"record", "status", "--help"}, {"daemon", "--help"},
+            {"cancel", "--help"}, {"quit", "--help"}, {"doctor", "--help"}, {"--help-all"}};
         for (const auto &arguments : commands) {
             QProcess process;
             process.setProcessEnvironment(environment);
@@ -30,14 +37,34 @@ private slots:
             const auto output = process.readAllStandardOutput();
             QVERIFY(output.contains("Usage: snipline"));
             QVERIFY(!output.contains("Arguments:"));
-            QVERIFY(!output.contains("[command]"));
+            QVERIFY(!output.contains("snipline [command]"));
             if (arguments == QStringList{"--help"}) {
                 QVERIFY(output.contains("Commands:"));
                 QVERIFY(output.contains("Toggle recording"));
             }
             if (arguments == QStringList{"help", "record"}) QVERIFY(output.contains("Subcommands:"));
-            if (arguments.contains("pause") || arguments.contains("resume"))
-                QVERIFY(output.contains("same toggle"));
+             if (arguments.contains("pause") || arguments.contains("resume"))
+                 QVERIFY(output.contains("same toggle"));
+             if (arguments == QStringList{"qr", "--help"} || arguments == QStringList{"ocr", "--help"}) {
+                 QVERIFY(output.contains("[target]"));
+                 QVERIFY(output.contains("--file"));
+                 QVERIFY(output.contains("--live"));
+                 QVERIFY(output.contains("--frozen"));
+                 QVERIFY(!output.contains("default frozen"));
+                 QVERIFY(!output.contains("--video-format"));
+             }
+             if (arguments == QStringList{"help", "ocr", "region"}) {
+                 QVERIFY(output.contains("Positional arguments:"));
+                 QVERIFY(!output.contains("  --file <path>"));
+                 QVERIFY(output.contains("--live"));
+             }
+             QVERIFY(!output.contains("config.target"));
+             QVERIFY(!output.contains("config.live"));
+             QVERIFY(!output.contains("ocr.languages"));
+             QVERIFY(!output.contains("config default"));
+             QVERIFY(!output.contains("30 FPS"));
+             QVERIFY(!output.contains("countdown 3"));
+             QVERIFY(!output.contains("Startup settings:"));
         }
         for (const auto &arguments : QList<QStringList>{
                  {"help", "unknown"}, {"pause"}, {"record", "unknown"},
@@ -59,7 +86,7 @@ private slots:
         qputenv("XDG_CONFIG_HOME", configDirectory.path().toUtf8());
         QFile config(configDirectory.filePath("custom.json"));
         QVERIFY(config.open(QIODevice::WriteOnly));
-        config.write(R"({"format":"webp","clipboard":false})");
+        config.write(R"({"screenshots":{"format":"webp","live":true},"clipboard":false})");
         config.close();
         QProcess resident;
         resident.start(binary, {"daemon", "--config", config.fileName()});
@@ -95,6 +122,20 @@ private slots:
         QCOMPARE(run({"capture", "region"}), 1);
         QCOMPARE(run({"capture", "region", "--live"}), 1);
         QCOMPARE(run({"capture", "window", "--live"}), 1);
+        QCOMPARE(run({"qr", "region"}), 1);
+        QCOMPARE(run({"qr", "region", "--live"}, &error), 1);
+        QVERIFY(error.contains("Wayland")); // Forwarded timing request, not rejected by parser.
+        QCOMPARE(run({"ocr", "monitor", "--frozen"}, &error), 1);
+        QVERIFY(error.contains("Wayland"));
+        QCOMPARE(run({"qr", "--live", "--frozen"}), 1);
+        QCOMPARE(run({"ocr", "--file", "image.png", "--live"}), 1);
+        QCOMPARE(run({"qr", "--file", "image.png", "--frozen"}), 1);
+        QCOMPARE(run({"qr", "--file", configDirectory.filePath("missing.png")}), 0);
+        QCOMPARE(run({"cancel"}), 0);
+        QCOMPARE(run({"ocr", "--file", configDirectory.filePath("missing.png")}), 0);
+        QCOMPARE(run({"cancel"}), 0);
+        QCOMPARE(run({"capture", "--file", "image.png"}), 1);
+        QCOMPARE(run({"qr", "region", "--file", "image.png"}), 1);
         QCOMPARE(run({"daemon", "--format", "jpeg"}), 1);
         QCOMPARE(run({"quit"}), 0);
         QVERIFY(resident.waitForFinished(5000));

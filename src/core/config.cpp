@@ -1,4 +1,5 @@
 #include "config.h"
+#include "editorcommand.h"
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -8,6 +9,7 @@
 #include <QKeySequence>
 #include <QSet>
 #include <QStandardPaths>
+#include <QRegularExpression>
 #include <cmath>
 
 namespace snip {
@@ -21,6 +23,8 @@ QString resolve(QString value, const QString &base) {
 Config::Config() {
   directory = QDir(QStandardPaths::writableLocation(QStandardPaths::PicturesLocation))
                   .filePath("Snipline");
+  recordingDirectory = QDir(QStandardPaths::writableLocation(QStandardPaths::MoviesLocation))
+                           .filePath("Snipline");
 }
 QString Config::defaultPath() {
   return QDir(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation))
@@ -46,17 +50,66 @@ bool Config::load(const QByteArray &json, const QString &base, QString *error) {
   if (parse.error != QJsonParseError::NoError || !doc.isObject())
     return reject("expected a JSON object. " + parse.errorString());
   Config next = *this;
-  const auto object = doc.object();
+  auto object = doc.object();
+  // Normalize the public screenshots block into the existing internal fields.
+  // Legacy layouts remain readable, but duplicate definitions are ambiguous.
+  if (object.contains("screenshots")) {
+    if (!object["screenshots"].isObject()) return reject("screenshots must be an object.");
+    const auto screenshots = object["screenshots"].toObject();
+    const QSet<QString> keys{"directory", "target", "live", "format", "editor"};
+    for (auto it = screenshots.begin(); it != screenshots.end(); ++it) {
+      if (!keys.contains(it.key())) return reject("unknown screenshots key " + it.key());
+      if (it.key() == "editor") {
+        QString editorError;
+        if (!it.value().isString()) return reject("screenshots.editor must be a command string.");
+        if (!validateEditorCommand(it.value().toString(), &editorError)) return reject(editorError);
+        next.screenshotEditor = it.value().toString().trimmed();
+      } else if (it.key() == "directory") {
+        if (!it.value().isString() || it.value().toString().trimmed().isEmpty())
+          return reject("screenshots.directory must be a nonempty path string.");
+        const auto legacy = object.value("directory");
+        if (legacy.isString() || legacy.toObject().contains("screenshots"))
+          return reject("use screenshots.directory without a legacy screenshot directory.");
+        if (!legacy.isUndefined() && !legacy.isObject())
+          return reject("legacy directory must be a path string or directory object.");
+        auto paths = legacy.toObject();
+        paths.insert("screenshots", it.value());
+        object.insert("directory", paths);
+      } else {
+        if (object.contains(it.key()))
+          return reject("use screenshots." + it.key() + " without the legacy top-level " + it.key() + ".");
+        object.insert(it.key(), it.value());
+      }
+    }
+  }
   const QSet<QString> known{"directory", "format", "theme", "target", "live",
-      "clipboard", "notifications", "notificationTimeout", "keybindings", "recording", "filenameTemplate"};
+      "clipboard", "notifications", "notificationTimeout", "keybindings", "recording", "filenameTemplate", "ocr", "screenshots"};
   for (auto it = object.begin(); it != object.end(); ++it)
     if (!known.contains(it.key())) return reject("unknown key " + it.key());
-  for (const auto &key : {"directory", "format", "theme", "target", "filenameTemplate"}) {
+  if (object.contains("directory")) {
+    const auto directories = object["directory"];
+    if (directories.isString()) {
+      // Keep existing screenshot-only configs readable.
+      if (directories.toString().trimmed().isEmpty()) return reject("directory must not be empty.");
+      next.directory = resolve(directories.toString(), base);
+    } else if (directories.isObject()) {
+      const auto paths = directories.toObject();
+      for (auto it = paths.begin(); it != paths.end(); ++it) {
+        if (it.key() != "screenshots" && it.key() != "recordings")
+          return reject("unknown directory key " + it.key());
+        if (!it.value().isString() || it.value().toString().trimmed().isEmpty())
+          return reject("directory." + it.key() + " must be a nonempty path string.");
+        const auto path = resolve(it.value().toString(), base);
+        if (it.key() == "screenshots") next.directory = path;
+        else next.recordingDirectory = path;
+      }
+    } else return reject("directory must be an object with screenshots and/or recordings paths.");
+  }
+  for (const auto &key : {"format", "theme", "target", "filenameTemplate"}) {
     if (!object.contains(key)) continue;
     if (!object[key].isString() || object[key].toString().isEmpty())
       return reject(QString(key) + " must be a nonempty string.");
     const auto value = object[key].toString();
-    if (QString(key) == "directory") next.directory = resolve(value, base);
     if (QString(key) == "theme") next.theme = resolve(value, base);
     if (QString(key) == "format") next.format = value.toLatin1();
     if (QString(key) == "target") next.target = value;
@@ -83,6 +136,25 @@ bool Config::load(const QByteArray &json, const QString &base, QString *error) {
     destination = int(n);
     return true;
   };
+  if (object.contains("ocr")) {
+    if (!object["ocr"].isObject()) return reject("ocr must be an object.");
+    const auto ocr = object["ocr"].toObject();
+    for (auto it = ocr.begin(); it != ocr.end(); ++it)
+      if (it.key() != "languages") return reject("unknown ocr key " + it.key());
+    if (ocr.contains("languages")) {
+      if (!ocr["languages"].isArray() || ocr["languages"].toArray().isEmpty() ||
+          ocr["languages"].toArray().size() > 32) return reject("ocr.languages must contain 1–32 language names.");
+      QStringList languages;
+      const QRegularExpression valid("^[A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)*$");
+      for (const auto &value : ocr["languages"].toArray()) {
+        const auto language = value.toString();
+        if (!value.isString() || language.size() > 128 || language == "osd" || !valid.match(language).hasMatch())
+          return reject("invalid OCR language name.");
+        if (!languages.contains(language)) languages.append(language);
+      }
+      next.ocrLanguages = languages;
+    }
+  }
   if (object.contains("notificationTimeout") &&
       !integer(object["notificationTimeout"], 0, 60000, next.notificationTimeout))
     return reject("notificationTimeout must be an integer from 0 to 60000 ms.");
@@ -114,17 +186,29 @@ bool Config::load(const QByteArray &json, const QString &base, QString *error) {
     if (!object["recording"].isObject()) return reject("recording must be an object.");
     const auto recording = object["recording"].toObject();
     for (auto it = recording.begin(); it != recording.end(); ++it) {
-      if (it.key() == "systemAudio" || it.key() == "microphone") {
-        if (!it.value().isBool()) return reject(it.key() + " must be boolean.");
-        if (it.key() == "systemAudio") next.systemAudio = it.value().toBool();
-        else next.microphone = it.value().toBool();
-      } else if (it.key() == "systemAudioDevice" || it.key() == "microphoneDevice") {
-        if (!it.value().isString()) return reject(it.key() + " must be a source name string.");
-        const auto device = it.value().toString();
-        for (const auto ch : device)
-          if (!ch.isPrint()) return reject("Audio source names cannot contain control characters.");
-        if (it.key() == "systemAudioDevice") next.systemAudioDevice = device;
-        else next.microphoneDevice = device;
+      if (it.key() == "codec" || it.key() == "encoder") {
+        if (!it.value().isString()) return reject(it.key() + " must be a string.");
+        const auto value = it.value().toString();
+        if (it.key() == "codec") {
+          if (!QStringList{"auto", "h264", "h265", "vp8", "vp9", "av1"}.contains(value))
+            return reject("recording codec must be auto, h264, h265, vp8, vp9 or av1.");
+          next.recordingCodec = value;
+        } else {
+          if (!QStringList{"software", "auto", "vaapi", "nvenc", "qsv"}.contains(value))
+            return reject("recording encoder must be software, auto, vaapi, nvenc or qsv.");
+          next.recordingEncoder = value;
+        }
+      } else if (it.key() == "directory") {
+        if (object["directory"].toObject().contains("recordings"))
+          return reject("use recording.directory without also specifying legacy directory.recordings.");
+        if (!it.value().isString() || it.value().toString().trimmed().isEmpty())
+          return reject("recording directory must be a nonempty path string.");
+        next.recordingDirectory = resolve(it.value().toString(), base);
+      } else if (it.key() == "editor") {
+        QString editorError;
+        if (!it.value().isString()) return reject("recording.editor must be a command string.");
+        if (!validateEditorCommand(it.value().toString(), &editorError)) return reject(editorError);
+        next.videoEditor = it.value().toString().trimmed();
       } else if (it.key() == "format") {
         next.recordingFormat = it.value().toString();
         if (next.recordingFormat != "mp4" && next.recordingFormat != "webm" && next.recordingFormat != "gif")
@@ -140,6 +224,11 @@ bool Config::load(const QByteArray &json, const QString &base, QString *error) {
   }
   if (next.systemAudioDevice.isEmpty())
     return reject("systemAudioDevice must name a monitor source (default: @DEFAULT_MONITOR@).");
+  const auto codecs = next.recordingFormat == "mp4" ? QStringList{"auto", "h264", "h265", "av1"}
+      : next.recordingFormat == "webm" ? QStringList{"auto", "vp8", "vp9", "av1"} : QStringList{"auto", "vp8"};
+  if (!codecs.contains(next.recordingCodec)) return reject("recording codec is incompatible with its format.");
+  if (next.recordingFormat == "gif" && next.recordingEncoder != "software" && next.recordingEncoder != "auto")
+    return reject("GIF requires software or auto encoding.");
   *this = next;
   if (error) error->clear();
   return true;

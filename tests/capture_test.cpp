@@ -42,7 +42,8 @@ private slots:
     void frozenAcquisitionAndVerification()
     {
         validDiscovery();
-        script("grim", "printf 'P3\\n2 2\\n255\\n255 0 0 255 0 0 255 0 0 255 0 0\\n'\n");
+        script("grim", "for arg do [ \"$arg\" != '-c' ] || exit 99; done\n"
+               "printf 'P3\\n2 2\\n255\\n255 0 0 255 0 0 255 0 0 255 0 0\\n'\n");
         GrimCapture capture;
         QSignalSpy ready(&capture, &CaptureBackend::ready);
         QSignalSpy failed(&capture, &CaptureBackend::failed);
@@ -113,7 +114,8 @@ private slots:
     void liveAcquiresFreshPixels()
     {
         validDiscovery();
-        script("grim", "printf 'P3\\n2 2\\n255\\n0 0 255 0 0 255 0 0 255 0 0 255\\n'\n");
+        script("grim", "for arg do [ \"$arg\" != '-c' ] || exit 99; done\n"
+               "printf 'P3\\n2 2\\n255\\n0 0 255 0 0 255 0 0 255 0 0 255\\n'\n");
         GrimCapture capture;
         QSignalSpy ready(&capture, &CaptureBackend::ready);
         capture.startLive();
