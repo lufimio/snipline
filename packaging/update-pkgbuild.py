@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin an Arch PKGBUILD to a published source release (or a local release archive)."""
+"""Pin an Arch PKGBUILD to a published source/binary release or local archive."""
 import argparse
 import hashlib
 from pathlib import Path
@@ -32,11 +32,14 @@ def main() -> None:
     parser.add_argument("--repository", required=True, help="GitHub owner/repository")
     parser.add_argument("--version", required=True, help="Stable version without v, such as 0.1.0")
     parser.add_argument("--archive", type=Path, help="Hash a local source archive instead of downloading")
-    parser.add_argument("--template", type=Path, default=Path(__file__).resolve().parents[1] / "PKGBUILD")
-    parser.add_argument("--output", type=Path, default=Path("PKGBUILD"))
+    parser.add_argument("--binary", action="store_true", help="Use the prebuilt linux-x86_64 archive and snipline-bin template")
+    parser.add_argument("--template", type=Path)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     # Validate before constructing any URL or touching the output.
-    template = args.template.read_text()
+    relative = Path("packaging/bin/PKGBUILD") if args.binary else Path("PKGBUILD")
+    template = (args.template or Path(__file__).resolve().parents[1] / relative).read_text()
+    output = args.output or relative
     render(template, args.repository, args.version, "0" * 64)
     digest = hashlib.sha256()
     if args.archive:
@@ -44,8 +47,9 @@ def main() -> None:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
     else:
+        suffix = "-linux-x86_64" if args.binary else ""
         url = (f"https://github.com/{args.repository}/releases/download/v{args.version}/"
-               f"snipline-{args.version}.tar.gz")
+               f"snipline-{args.version}{suffix}.tar.gz")
         with urllib.request.urlopen(url, timeout=60) as stream:
             total = 0
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -53,8 +57,8 @@ def main() -> None:
                 if total > 128 * 1024 * 1024:
                     raise ValueError("source archive exceeds 128 MiB")
                 digest.update(chunk)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(render(template, args.repository, args.version, digest.hexdigest()))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(render(template, args.repository, args.version, digest.hexdigest()))
 
 
 if __name__ == "__main__":

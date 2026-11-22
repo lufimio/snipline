@@ -41,6 +41,24 @@ class UpdatePkgbuildTest(unittest.TestCase):
                             "--archive", str(archive), "--output", str(output)], check=True)
             self.assertIn(hashlib.sha256(archive.read_bytes()).hexdigest(), output.read_text())
 
+    def test_binary_archive_hash_and_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            archive = path / "binary.tar.gz"
+            archive.write_bytes(b"prebuilt installation tree fixture")
+            output = path / "PKGBUILD"
+            subprocess.run([sys.executable, str(ROOT / "packaging/update-pkgbuild.py"),
+                            "--binary", "--repository", "example/snipline",
+                            "--version", "1.2.3", "--archive", str(archive),
+                            "--output", str(output)], check=True)
+            text = output.read_text()
+            self.assertIn("pkgname=snipline-bin", text)
+            self.assertIn("snipline-$pkgver-linux-$CARCH.tar.gz", text)
+            self.assertIn(hashlib.sha256(archive.read_bytes()).hexdigest(), text)
+            self.assertNotIn(".pkg.tar.zst", text)
+            self.assertNotIn("build()", text)
+            self.assertNotIn("check()", text)
+
 
 if __name__ == "__main__":
     unittest.main()

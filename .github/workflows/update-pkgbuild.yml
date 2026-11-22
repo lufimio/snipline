@@ -72,18 +72,26 @@ jobs:
         run: |
           python packaging/update-pkgbuild.py --repository "$GITHUB_REPOSITORY" \
             --version "$VERSION"
+          python packaging/update-pkgbuild.py --binary --repository "$GITHUB_REPOSITORY" \
+            --version "$VERSION"
           useradd --create-home builder
           install -d -o builder -g builder /home/builder/metadata
           cp PKGBUILD /home/builder/metadata/
           chown builder:builder /home/builder/metadata/PKGBUILD
           runuser -u builder -- bash -c \
             'cd /home/builder/metadata && makepkg --printsrcinfo' > .SRCINFO
+          cp packaging/bin/PKGBUILD /home/builder/metadata/PKGBUILD
+          chown builder:builder /home/builder/metadata/PKGBUILD
+          runuser -u builder -- bash -c \
+            'cd /home/builder/metadata && makepkg --printsrcinfo' > packaging/bin/.SRCINFO
       - uses: peter-evans/create-pull-request@v7
         with:
           branch: automation/update-pkgbuild
           title: 'Update Arch package to ${{ steps.release.outputs.version }}'
           commit-message: 'chore: update Arch package to ${{ steps.release.outputs.version }}'
-          body: 'Updates PKGBUILD and .SRCINFO to the published release with a pinned source SHA-256. Tests are not built or run by the package.'
+          body: 'Updates source and binary AUR recipes with pinned release SHA-256 checksums. Packaging files stay in the repository, not release assets.'
           add-paths: |
             PKGBUILD
             .SRCINFO
+            packaging/bin/PKGBUILD
+            packaging/bin/.SRCINFO
