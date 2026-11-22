@@ -6,7 +6,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc='Wayland screenshot, recording, QR and OCR selector'
 arch=('x86_64')
-url='https://github.com/OWNER/REPOSITORY'
+url='https://github.com/lufimio/snipline'
 license=('MIT')
 depends=('curl'
   'gcc-libs' 'glibc'
@@ -23,7 +23,7 @@ optdepends=(
 )
 options=('!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
-sha256sums=('REPLACE_WITH_RELEASE_SHA256')
+sha256sums=('6bf450881c299b6190af574222ec5e68f235430e4e3017d57b53ff98292c6f0a')
 
 build() {
   cmake -S "$srcdir/$pkgname-$pkgver" -B "$srcdir/build" -G Ninja \
