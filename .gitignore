@@ -1,4 +1,5 @@
 /build*/
 /.cache/
 /CMakeUserPresets.json
+__pycache__/
 plan.md

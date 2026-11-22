@@ -83,7 +83,7 @@ bool Config::load(const QByteArray &json, const QString &base, QString *error) {
     }
   }
   const QSet<QString> known{"directory", "format", "theme", "target", "live",
-      "clipboard", "notifications", "notificationTimeout", "keybindings", "recording", "filenameTemplate", "ocr", "screenshots"};
+      "clipboard", "notifications", "notificationTimeout", "keybindings", "recording", "filenameTemplate", "ocr", "screenshots", "uploaders", "lens"};
   for (auto it = object.begin(); it != object.end(); ++it)
     if (!known.contains(it.key())) return reject("unknown key " + it.key());
   if (object.contains("directory")) {
@@ -136,6 +136,29 @@ bool Config::load(const QByteArray &json, const QString &base, QString *error) {
     destination = int(n);
     return true;
   };
+  for (const auto &section : {QString("uploaders"), QString("lens")}) {
+    if (!object.contains(section)) continue;
+    if (!object[section].isObject()) return reject(section + " must be an object.");
+    const auto settings = object[section].toObject();
+    for (auto it = settings.begin(); it != settings.end(); ++it) {
+      if (it.key() == (section == "uploaders" ? "default" : "destination")) {
+        if (!it.value().isString() || it.value().toString().trimmed().isEmpty() || it.value().toString().size() > 160)
+          return reject(section + ".destination must be a nonempty destination name.");
+        for (const auto ch : it.value().toString()) if (!ch.isPrint()) return reject("Destination names cannot contain control characters.");
+        if (section == "uploaders") next.uploadDestination = it.value().toString();
+        else next.lensDestination = it.value().toString();
+      } else if (section == "uploaders" && it.key() == "timeout") {
+        if (!integer(it.value(), 5, 3600, next.uploadTimeout)) return reject("upload.timeout must be 5–3600 seconds.");
+      } else if (section == "uploaders" && it.key() == "custom") {
+        if (!it.value().isArray() || it.value().toArray().size() > 32) return reject("upload.uploaders must be an array of at most 32 local .sxcu paths.");
+        next.uploaders.clear();
+        for (const auto &path : it.value().toArray()) {
+          if (!path.isString() || path.toString().trimmed().isEmpty()) return reject("Uploader paths must be nonempty strings.");
+          next.uploaders.append(resolve(path.toString(), base));
+        }
+      } else return reject("unknown " + section + " key " + it.key());
+    }
+  }
   if (object.contains("ocr")) {
     if (!object["ocr"].isObject()) return reject("ocr must be an object.");
     const auto ocr = object["ocr"].toObject();

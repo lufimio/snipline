@@ -26,7 +26,8 @@ private slots:
             {"record", "region", "--help"}, {"record", "monitor", "--help"},
             {"record", "window", "--help"}, {"record", "discard", "--help"},
             {"record", "status", "--help"}, {"daemon", "--help"},
-            {"cancel", "--help"}, {"quit", "--help"}, {"doctor", "--help"}, {"--help-all"}};
+            {"cancel", "--help"}, {"quit", "--help"}, {"doctor", "--help"},
+            {"upload", "--help"}, {"lens", "--help"}, {"lens", "window", "--help"}, {"--help-all"}};
         for (const auto &arguments : commands) {
             QProcess process;
             process.setProcessEnvironment(environment);
@@ -136,6 +137,13 @@ private slots:
         QCOMPARE(run({"cancel"}), 0);
         QCOMPARE(run({"capture", "--file", "image.png"}), 1);
         QCOMPARE(run({"qr", "region", "--file", "image.png"}), 1);
+        QCOMPARE(run({"upload"}), 1);
+        QCOMPARE(run({"upload", "--file", configDirectory.filePath("missing.png")}), 1);
+        QCOMPARE(run({"upload", "--file", "missing.png", "--service", "missing-host"}, &error), 1);
+        QVERIFY(error.contains("fallback") || error.contains("grabit"));
+        QCOMPARE(run({"lens", "--file", configDirectory.filePath("missing.png")}), 1);
+        QCOMPARE(run({"lens", "--file", "image.png", "--live"}), 1);
+        QCOMPARE(run({"lens", "region"}), 1); // Offscreen rejects capture; never uploads.
         QCOMPARE(run({"daemon", "--format", "jpeg"}), 1);
         QCOMPARE(run({"quit"}), 0);
         QVERIFY(resident.waitForFinished(5000));

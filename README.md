@@ -34,9 +34,13 @@ A standalone C++20 / Qt Quick screenshot and recording selector for Wayland, bei
 
 - Local asynchronous QR/barcode recognition (ZXing-C++) and OCR (Tesseract CLI),
   from confirmed selections, saved captures or existing raster images.
+- Configurable screenshot/video editor handoff, with filename placeholders or
+  file contents on stdin; saved-file notification actions.
+- Explicit file uploads through libcurl, custom `.sxcu` destinations and Google
+  Lens handoff, with cancellable background transfers and no extra confirmation dialogs.
 
-**Not yet implemented:** portal fallback, cross-output recording, Satty,
-uploads, history, tray or autostart. Native capture depends on the installed
+**Not yet implemented:** portal fallback, cross-output recording, generic editor-output
+tracking, history, tray or autostart. Native capture depends on the installed
 `grim` and compositor supporting a compatible protocol. Hyprland screenshots
 have been manually tested by the user; **niri end-to-end support is not
 established** by the IPC parser. See the [compatibility matrix](docs/compatibility.md).
@@ -51,9 +55,11 @@ tools. Short/narrow outputs use scrolling options and a compact action strip.
 
 The Capture arrow offers **Save** (file only), **Copy** (clipboard only),
 **Open folder**, and **Open picture** (save first, then open). The normal Capture
-button follows the configured clipboard setting. Annotate is still unavailable.
-Google Lens has a magnifying-glass toolbar placeholder, and both result menus
-include a disabled Upload entry. Neither performs network requests yet.
+button follows the configured clipboard setting. **Annotate** saves first and
+launches `screenshots.editor`; it is greyed out when that command is empty.
+Google Lens is a separate magnifying-glass tool, and both result menus offer
+Upload. They are disabled while another upload is running. Choosing Upload/Lens is the network action—there is no extra
+confirmation dialog and ordinary captures never upload.
 The arrow is disabled whenever Capture/Record is disabled.
 
 Recording displays its countdown centered in the selected region, with the
@@ -66,10 +72,33 @@ Escape hides these controls; Discard is explicit.
 The recording arrow chooses saving, opening the folder/video, or editing **after
 the recording is successfully saved**. The selected action is applied by
 **Finish recording**; there is no separate result-action button.
-Configure the video editor command in Session settings or `recording.editor`
-in JSON (for example, `"editor": "kdenlive"`). Quoted arguments are supported;
-Snipline appends the saved video path as one argument, without invoking a shell.
+Configure the editor command in Session settings or `screenshots.editor` /
+`recording.editor` in JSON. For example, `"editor": "losslesscut {}"` replaces
+`{}` with the saved filename; `"editor": "satty --filename -"` connects the saved
+file's contents directly to stdin. No filename is appended when `{}` is absent.
+Double-quoted arguments are supported, with substitution after argument parsing
+so filenames containing spaces remain a single argument. No implicit shell runs.
 Discard/failure never launches an application.
+
+Saved screenshot/video notifications offer **Open**, **Open Folder**, and
+**Edit** when an editor is configured, plus **Upload** when a destination
+is available. Lens is not offered in notifications. Desktop notifications do not support
+disabled buttons, so unconfigured Edit is omitted; the in-app Annotate/Edit
+entry is disabled instead.
+Notifications retain the original file/command, not the current tool settings,
+and session lock invalidates pending actions.
+
+Editors run independently and may remain open after Snipline exits. Snipline
+does not modify/delete the source while handing it off, but a trusted editor
+receiving a filename can modify it. The editor controls its output location and
+saving; Snipline does not infer edited-output success from launching or closing
+an arbitrary external command. The original Milestone 4 output-tracking workflow
+is not guaranteed by this generic handoff. Older editor commands that relied on
+automatic filename appending must add `{}` explicitly.
+
+Arch packaging and the release/update workflows are described in
+[`packaging/README.md`](packaging/README.md). The repository URL/checksum remain
+explicit placeholders until a real GitHub repository/release is configured.
 
 **Settings…** edits the save directory, filename template, notifications and
 screenshot clipboard copying for the resident session. The audio selector is a
@@ -197,8 +226,9 @@ Default selector shortcuts (all configurable under `keybindings`):
 | Copy screenshot (clipboard only) | Ctrl+C |
 | Save and open picture/video | Ctrl+O |
 | Save and open folder | Ctrl+Shift+O |
-| Save and edit recording | Ctrl+E |
-| Capture / Record / QR / OCR | Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 |
+| Save and annotate/edit | Ctrl+E |
+| Upload screenshot/recording | Ctrl+U |
+| Capture / Record / QR / OCR / Lens | Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 / Ctrl+5 |
 | Region / Monitor / Window | Shift+1 / Shift+2 / Shift+3 |
 
 Keys are local to the selector, not global desktop shortcuts. Tool/target
@@ -208,8 +238,8 @@ The cursor shortcut is disabled for QR/OCR. Clipboard copying is controlled only
 in main session settings, not duplicated in screenshot-specific options.
 Result-action shortcuts match the arrow-menu actions. For recording selection,
 they start recording with that post-save action; while recording controls are
-visible, they finish recording with that action. Copy is capture-only and Edit
-is recording-only. Shortcuts are disabled in settings/audio/language popups and
+visible, they finish recording with that action. Copy is capture-only; Edit
+works for screenshots and recordings when their editor is configured. Shortcuts are disabled in settings/audio/language popups and
 when confirmation/finalization is unavailable. Menus show the first assigned key.
 When migrating an older keymap, move the old Ctrl+number target bindings to
 Shift+number (or reassign the tool shortcuts) to avoid conflicts.
@@ -222,6 +252,53 @@ Duplicate shortcuts and multi-step sequences are rejected.
 Saved screenshot notifications supply the image file URI as both the icon and
 the standard `image-path` hint. Actual thumbnail size/display depends on the
 notification daemon. Disable notifications with `"notifications": false`.
+
+### Uploads and Google Lens
+
+Uploads use libcurl directly; no grabit executable or configuration is needed.
+Choose a destination in toolbar options, then Upload (Ctrl+U), or use a saved-file
+notification. Ordinary capture, configuration and reading `.sxcu` files never
+upload. There are no extra confirmation dialogs. Originals are retained.
+
+Built-ins: `catbox`, `litterbox-1h`, `litterbox-12h`, `litterbox-24h`,
+`litterbox-72h`, and `pomf` (pomf.lain.la). No automatic host fallback is used.
+Failures report libcurl/HTTP details and expire after the configured notification
+timeout, or five seconds when that setting is zero. Transfers can be cancelled;
+cancellation cannot remove data already accepted by the host.
+
+```json
+{
+  "uploaders": {
+    "default": "catbox",
+    "timeout": 180,
+    "custom": ["/path/to/myhost.sxcu"]
+  },
+  "lens": { "destination": "litterbox-1h" }
+}
+```
+
+Custom destinations use `sxcu:Name` from the definition's `Name` field. Paths are
+relative to the configuration file; `~/` is supported. Timeout is 5–3600 seconds.
+Definitions support fixed HTTPS endpoints (HTTP only on loopback), POST/PUT
+multipart bodies, `FileFormName`, literal string `Arguments`, string `Headers`,
+and either `{response}` or `{json:files[0].url}`-style response extraction.
+Other response templates/body types are rejected. Definitions are limited to
+64 KiB. Treat authentication headers as credentials. Redirects are not followed,
+so upload credentials and file contents are not forwarded to another endpoint.
+
+Lens remains a separate toolbar tool (Ctrl+5) and CLI action, not a notification
+action. It uploads the image to the selected Lens host and sends its public URL
+to Google. Google may retain/process it independently of host expiration.
+Lens does not change the clipboard; ordinary uploads copy the resulting URL.
+
+```sh
+snipline upload --file "/path/recording.mp4" --service pomf
+snipline lens region --live
+snipline lens --file "/path/image.png"
+```
+
+Session settings are configured through JSON; the session-settings panel has
+been removed. Regular toolbar capture/recording options remain available.
 
 ### Screenshot filenames
 

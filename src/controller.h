@@ -12,6 +12,7 @@
 #include "audiosources.h"
 #include "recognition.h"
 #include "notification.h"
+#include "uploader.h"
 #include <QDBusObjectPath>
 #include <QQuickImageProvider>
 #include <QQuickView>
@@ -66,6 +67,8 @@ class Controller final : public QObject {
   Q_PROPERTY(QString editor READ editor WRITE setEditor NOTIFY changed)
   Q_PROPERTY(QString action READ action NOTIFY changed)
   Q_PROPERTY(QObject *recognition READ recognition CONSTANT)
+  Q_PROPERTY(QObject *upload READ upload CONSTANT)
+  Q_PROPERTY(QString lensDestination READ lensDestination WRITE setLensDestination NOTIFY changed)
   Q_PROPERTY(QString lastCapture READ lastCapture NOTIFY changed)
   Q_PROPERTY(QString imageFormat READ imageFormat WRITE setImageFormat NOTIFY changed)
   Q_PROPERTY(QString saveDirectory READ saveDirectory WRITE setSaveDirectory NOTIFY changed)
@@ -85,7 +88,7 @@ public:
              QObject *parent = nullptr, CaptureBackend *capture = nullptr,
              WindowBackend *windows = nullptr, SurfaceBarrier *barrier = nullptr,
                WindowPicker *picker = nullptr, VideoRecorder *recorder = nullptr,
-               AudioSources *audio = nullptr);
+                AudioSources *audio = nullptr, Uploader *upload = nullptr);
   ~Controller() override;
   QString error() const { return m_error; }
   bool busy() const { return m_busy; }
@@ -106,6 +109,7 @@ public:
     m_config = config;
     m_recordDirectory = config.recordingDirectory;
     m_recognition.setPreferredLanguages(config.ocrLanguages);
+    m_upload->configure(config.uploadDestination, config.uploaders);
     emit changed();
   }
   bool recording() const { return m_recording; }
@@ -135,6 +139,10 @@ public:
   QString action() const { return m_recording ? "record" : m_recognitionAction.isEmpty() ? "capture" : m_recognitionAction; }
   QString lastCapture() const { return m_lastCapture; }
   QObject *recognition() { return &m_recognition; }
+  QObject *upload() { return m_upload; }
+  QString lensDestination() const { return m_upload->resolveDestination(m_config.lensDestination); }
+  void setLensDestination(const QString &destination);
+  Q_INVOKABLE void cancelUpload() { m_upload->cancel(); }
   Q_INVOKABLE void closeRecognition();
   Q_INVOKABLE bool copyRecognition(int index = -1);
   Q_INVOKABLE bool canOpenCode(int index) const;
@@ -180,6 +188,8 @@ public slots:
   Q_SCRIPTABLE QString CaptureWithMode(const QString &mode, bool live);
   Q_SCRIPTABLE QString Recognize(const QString &kind, const QString &target, const QString &file);
   Q_SCRIPTABLE QString RecognizeWithMode(const QString &kind, const QString &target, const QString &file, int live);
+  Q_SCRIPTABLE QString Upload(const QString &file, const QString &destination);
+  Q_SCRIPTABLE QString Lens(const QString &target, const QString &file, int live);
   Q_SCRIPTABLE void Cancel();
   Q_SCRIPTABLE void Quit();
   Q_SCRIPTABLE QString Record(const QString &mode, const QString &format, bool systemAudio, bool microphone);
@@ -204,7 +214,9 @@ private:
   void hideOverlays();
   QString showRecordingControls();
   bool validateResultAction(const QString &action, bool video);
-  void openResult(const QString &path, const QString &action, const QString &editorCommand = {});
+  void openResult(const QString &path, const QString &action, const QString &editorCommand = {},
+                  const QString &uploadDestination = {});
+  QString beginUpload(const QString &path, const QString &destination, bool lens);
   void notifySaved(const QString &title, const QString &body, const QString &path,
                    const QString &editorCommand, bool image);
   void restartSelection(const QString &mode, bool live);
@@ -232,6 +244,7 @@ private:
   void autoSelectWindowAudio(bool retarget = false);
   void updateRecordingAudio();
   AudioSources *m_audioSources;
+  Uploader *m_upload;
   QTimer m_audioTimer;
   bool m_queryAudio = false, m_audioUserEdited = false;
   QStringList m_manualAudioIds, m_autoAudioIds, m_suppressedAudioIds;
@@ -246,6 +259,9 @@ private:
   bool m_sessionLocked = false;
   bool m_recordControls = false;
   QString m_captureDisposition = "capture", m_postRecordingAction;
+  QString m_postUploadDestination, m_uploadEditor;
+  bool m_uploadImage = false;
+  quint64 m_uploadToken = 0;
   Recognition m_recognition;
   NotificationActions m_recognitionNotifications;
   NotificationActions m_savedNotifications;

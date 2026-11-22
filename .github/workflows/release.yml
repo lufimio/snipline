@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing stable version tag, e.g. v0.1.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Install Arch build and runtime dependencies
+        run: |
+          pacman -Syu --noconfirm --needed git python cmake ninja pkgconf \
+            qt6-base qt6-declarative qt6-wayland qt6-svg layer-shell-qt \
+            wayland wayland-protocols hyprland-protocols grim \
+            gstreamer gst-plugins-base gst-plugins-good gst-plugins-ugly gst-libav \
+            libpulse zxing-cpp
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+      - name: Validate release tag and project version
+        run: |
+          python - <<'PY'
+          import os, pathlib, re
+          tag = os.environ["RELEASE_TAG"]
+          if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+              raise SystemExit("Only stable vX.Y.Z tags are supported")
+          text = pathlib.Path("CMakeLists.txt").read_text()
+          version = re.search(r"project\(snipline VERSION ([0-9.]+)", text).group(1)
+          if tag != "v" + version:
+              raise SystemExit("Tag must match the CMake project version")
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write("VERSION=" + version + "\n")
+          PY
+      - name: Create source archive and pinned PKGBUILD
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p dist
+          git archive --format=tar --prefix="snipline-${VERSION}/" HEAD \
+            | gzip -n > "dist/snipline-${VERSION}.tar.gz"
+          python packaging/update-pkgbuild.py --repository "$GITHUB_REPOSITORY" \
+            --version "$VERSION" --archive "dist/snipline-${VERSION}.tar.gz" \
+            --output dist/PKGBUILD
+      - name: Build the Arch package without tests
+        run: |
+          useradd --create-home builder
+          install -d -o builder -g builder /home/builder/package /home/builder/output
+          cp dist/PKGBUILD "dist/snipline-${VERSION}.tar.gz" /home/builder/package/
+          chown -R builder:builder /home/builder/package
+          runuser -u builder -- bash -c \
+            'cd /home/builder/package && PKGDEST=/home/builder/output makepkg --noconfirm --cleanbuild --nocheck'
+          cp /home/builder/output/*.pkg.tar.zst dist/
+          runuser -u builder -- bash -c \
+            'cd /home/builder/package && makepkg --printsrcinfo' > dist/.SRCINFO
+      - name: Checksum release assets
+        working-directory: dist
+        run: sha256sum -- snipline-*.tar.gz *.pkg.tar.zst PKGBUILD .SRCINFO > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/
+          include-hidden-files: true
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Publish GitHub release
+        run: |
+          gh release create "$RELEASE_TAG" --verify-tag --generate-notes \
+            --title "$RELEASE_TAG" dist/*.tar.gz dist/*.pkg.tar.zst \
+            dist/PKGBUILD dist/.SRCINFO dist/SHA256SUMS

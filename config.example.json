@@ -25,6 +25,14 @@
       "eng"
     ]
   },
+  "uploaders": {
+    "default": "catbox",
+    "timeout": 180,
+    "custom": []
+  },
+  "lens": {
+    "destination": "litterbox-1h"
+  },
   "keybindings": {
     "confirm": [
       "Return",
@@ -55,6 +63,9 @@
     "edit": [
       "Ctrl+E"
     ],
+    "upload": [
+      "Ctrl+U"
+    ],
     "capture": [
       "Ctrl+1"
     ],
@@ -66,6 +77,9 @@
     ],
     "ocr": [
       "Ctrl+4"
+    ],
+    "lens": [
+      "Ctrl+5"
     ],
     "region": [
       "Shift+1"

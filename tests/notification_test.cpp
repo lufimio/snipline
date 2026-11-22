@@ -10,6 +10,7 @@ public:
   uint next = 1;
   QList<QStringList> actions;
   QStringList bodies;
+  QList<uint> closed;
 public slots:
   uint Notify(const QString &, uint, const QString &, const QString &, const QString &body,
               const QStringList &buttons, const QVariantMap &, int) {
@@ -17,6 +18,7 @@ public slots:
     bodies.append(body);
     return next++;
   }
+  void CloseNotification(uint id) { closed.append(id); emit NotificationClosed(id, 3); }
 signals:
   void ActionInvoked(uint id, const QString &action);
   void NotificationClosed(uint id, uint reason);
@@ -85,11 +87,11 @@ private slots:
     QTest::qWait(30);
     QCOMPARE(opened.size(), 2);
     QSignalSpy edits(&notifications, &snip::NotificationActions::editRequested);
-    notifications.showEditor("Screenshot", "Saved", 5000, "/first.png", "satty --filename -", true);
-    notifications.showEditor("Recording", "Saved", 5000, "/second.mp4", "losslesscut {}", false);
+    notifications.showSaved("Screenshot", "Saved", 5000, "/first.png", "satty --filename -", true);
+    notifications.showSaved("Recording", "Saved", 5000, "/second.mp4", "losslesscut {}", false);
     QTRY_COMPARE(server.actions.size(), 10);
     QTest::qWait(30);
-    QCOMPARE(server.actions[8], (QStringList{"edit", "Edit"}));
+    QCOMPARE(server.actions[8], (QStringList{"open", "Open", "folder", "Open Folder", "edit", "Edit"}));
     QCOMPARE(edits.size(), 0);
     emit server.ActionInvoked(9, "edit");
     QTRY_COMPARE(edits.size(), 1);
@@ -100,15 +102,72 @@ private slots:
     QTest::qWait(30);
     QCOMPARE(edits.size(), 1);
     notifications.show("QR", "Old server link", 5000, first);
-    QTRY_COMPARE(server.actions.size(), 9);
+    QTRY_COMPARE(server.actions.size(), 11);
     QTest::qWait(30);
     QVERIFY(bus.unregisterService("org.freedesktop.Notifications"));
     QTest::qWait(30);
     QVERIFY(bus.registerService("org.freedesktop.Notifications"));
     QTest::qWait(30);
-    emit server.ActionInvoked(9, "open"); // Never reuse actions from a previous server owner.
+    emit server.ActionInvoked(11, "open"); // Never reuse actions from a previous server owner.
     QTest::qWait(30);
     QCOMPARE(opened.size(), 2);
+    QSignalSpy files(&notifications, &snip::NotificationActions::fileOpenRequested);
+    notifications.showSaved("Screenshot", "Saved", 5000, "/no-editor.png", {}, true);
+    QTRY_COMPARE(server.actions.size(), 12);
+    QTest::qWait(30);
+    QCOMPARE(server.actions[11], (QStringList{"open", "Open", "folder", "Open Folder"}));
+    emit server.ActionInvoked(12, "edit"); // Omitted actions cannot be forged.
+    QTest::qWait(30);
+    QCOMPARE(edits.size(), 1);
+    emit server.ActionInvoked(12, "open");
+    QTRY_COMPARE(files.size(), 1);
+    QCOMPARE(files[0][0].toString(), "/no-editor.png");
+    QVERIFY(!files[0][1].toBool());
+    notifications.showSaved("Recording", "Saved", 5000, "/video.mp4", {}, false);
+    QTRY_COMPARE(server.actions.size(), 13);
+    QTest::qWait(30);
+    emit server.ActionInvoked(13, "folder");
+    QTRY_COMPARE(files.size(), 2);
+    QCOMPARE(files[1][0].toString(), "/video.mp4");
+    QVERIFY(files[1][1].toBool());
+    notifications.showSaved("Screenshot", "Saved", 5000, "/locked.png", "editor {}", true);
+    notifications.invalidate();
+    QTRY_COMPARE(server.actions.size(), 14);
+    QTest::qWait(30);
+    emit server.ActionInvoked(14, "edit");
+    QTest::qWait(30);
+    QCOMPARE(edits.size(), 1);
+    QSignalSpy transfers(&notifications, &snip::NotificationActions::uploadRequested);
+    notifications.showSaved("Screenshot", "Saved", 5000, "/transfer.png", {}, true, "catbox", "litterbox-1h");
+    QTRY_COMPARE(server.actions.size(), 15);
+    QTest::qWait(30);
+    QVERIFY(server.actions[14].contains("upload"));
+    QVERIFY(!server.actions[14].contains("lens"));
+    QCOMPARE(transfers.size(), 0); // No confirmation or implicit upload on notification creation.
+    emit server.ActionInvoked(15, "upload");
+    QTRY_COMPARE(transfers.size(), 1);
+    QCOMPARE(transfers[0][0].toString(), "/transfer.png");
+    QCOMPARE(transfers[0][1].toString(), "catbox");
+    QVERIFY(!transfers[0][2].toBool());
+    QSignalSpy cancellations(&notifications, &snip::NotificationActions::cancelRequested);
+    notifications.showProgress("Uploading", "Fixture", 77);
+    notifications.closeProgress(77); // May finish before Notify replies.
+    QTRY_COMPARE(server.actions.size(), 16);
+    QTRY_VERIFY(server.closed.contains(16));
+    emit server.ActionInvoked(16, "cancel");
+    QTest::qWait(30);
+    QCOMPARE(cancellations.size(), 0);
+    notifications.showProgress("Uploading", "Fixture", 78);
+    QTRY_COMPARE(server.actions.size(), 17);
+    QTest::qWait(30);
+    emit server.ActionInvoked(17, "cancel");
+    QTRY_COMPARE(cancellations.size(), 1);
+    QCOMPARE(cancellations[0][0].toULongLong(), quint64(78));
+    notifications.show("Upload complete", "Link copied", 5000, first);
+    notifications.show("Google Lens", "Image uploaded", 5000, second);
+    QTRY_COMPARE(server.actions.size(), 19);
+    QCOMPARE(server.actions[17], (QStringList{"open", "Open"}));
+    QCOMPARE(server.actions[18], (QStringList{"open", "Open"}));
   }
 };
 QTEST_GUILESS_MAIN(NotificationTest)

@@ -104,7 +104,7 @@ int doctor() {
   const auto compositor = currentCompositor();
   QJsonObject dependencies;
   for (const auto *program : {"grim", "hyprctl", "niri", "gst-inspect-1.0",
-                              "tesseract", "satty", "grabit", "ffmpeg", "ffprobe", "pactl"})
+                              "tesseract", "satty", "ffmpeg", "ffprobe", "pactl"})
     dependencies[program] = !QStandardPaths::findExecutable(program).isEmpty();
   QJsonObject codecs;
   for (const auto *element :
@@ -161,13 +161,18 @@ int doctor() {
                                    {"live", true},
                                    {"window", true},
                                    {"portal", false},
-                                   {"qr", true}, {"ocr", true},
+                                   {"qr", true}, {"ocr", true}, {"editors", true},
+                                   {"uploads", true}, {"lens", true},
                                     {"recording", true}}},
        {"recognition", QJsonObject{{"barcodeBackend", "ZXing-C++ in separate worker"},
                                    {"workerFound", QFileInfo(QDir(QCoreApplication::applicationDirPath())
                                                               .filePath("snipline-recognize")).isExecutable()},
                                    {"ocrBackend", "asynchronous Tesseract CLI; installed language selection"},
                                    {"automaticLinkOpening", false}, {"networkTransmission", false}}},
+       {"uploads", QJsonObject{{"backend", "libcurl multipart file upload"},
+                                {"automaticUploads", false}, {"extraConfirmationDialogs", false},
+                                {"profiles", QJsonArray{"catbox", "litterbox-1h", "litterbox-12h", "litterbox-24h", "litterbox-72h", "pomf"}},
+                                {"lens", "explicit image upload followed by lens.google.com/uploadbyurl"}}},
        {"recording", QJsonObject{{"source", "repeated native capture; no desktop fallback for windows"},
                                   {"crossOutput", false}, {"hardwareEncoding", true},
                                   {"hardwareProbe", "separate synthetic probe process before recording; software fallback only in auto mode"},

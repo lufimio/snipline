@@ -10,6 +10,23 @@ using namespace snip;
 class SettingsTest : public QObject {
   Q_OBJECT
 private slots:
+  void uploadAndLensConfiguration() {
+    Config config;
+    QString error;
+    QVERIFY(config.load(R"({"uploaders":{"default":"uguu","timeout":60,"custom":["~/host.sxcu","local.sxcu"]},
+                            "lens":{"destination":"litterbox-12h"}})", "/tmp/opencode", &error));
+    QCOMPARE(config.uploadDestination, "uguu");
+    QCOMPARE(config.lensDestination, "litterbox-12h");
+    QCOMPARE(config.uploadTimeout, 60);
+    QCOMPARE(config.uploaders, (QStringList{QDir::home().filePath("host.sxcu"), "/tmp/opencode/local.sxcu"}));
+    for (const auto &bad : {R"({"uploaders":{"timeout":1}})", R"({"uploaders":{"custom":"path"}})",
+                            R"({"uploaders":{"custom":[false]}})", R"({"uploaders":{"default":""}})",
+                            R"({"lens":{"destination":false}})", R"({"lens":{"confirmation":true}})"}) {
+      QVERIFY(!config.load(bad, "/elsewhere", &error));
+      QCOMPARE(config.uploadDestination, "uguu");
+      QCOMPARE(config.uploadTimeout, 60);
+    }
+  }
   void separateEditorCommands() {
     Config config;
     QString error;
@@ -140,6 +157,10 @@ private slots:
     QCOMPARE(config.videoEditor, defaults.videoEditor);
     QCOMPARE(config.screenshotEditor, defaults.screenshotEditor);
     QCOMPARE(config.ocrLanguages, defaults.ocrLanguages);
+    QCOMPARE(config.uploadDestination, defaults.uploadDestination);
+    QCOMPARE(config.lensDestination, defaults.lensDestination);
+    QCOMPARE(config.uploaders, defaults.uploaders);
+    QCOMPARE(config.uploadTimeout, defaults.uploadTimeout);
   }
   void ocrLanguageConfiguration() {
     Config config;

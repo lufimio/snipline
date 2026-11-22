@@ -175,6 +175,29 @@ isolation correctly or excludes the unmounted overlays from its capture frames.
   fractional scales/rotation, throughput, audio source removal, lock signals,
   disk-full behavior and audiovisual synchronization on each compositor.
 
+## Editors, notifications and file transfers
+
+Validated locally on 2026-11-22:
+
+- Editor fixtures receive filename arguments with spaces/punctuation intact, or
+  exact binary file contents through stdin when `{}` is absent. Source files are
+  retained. This verifies the handoff, not arbitrary editors' output-saving behavior.
+- Saved-file notification actions are tested on a private D-Bus server, including
+  Open/Open Folder/Edit/Upload/Lens snapshots, unavailable actions, close/restart,
+  session-lock invalidation and progress cancellation races.
+- Native libcurl transport is tested against a loopback multipart HTTP fixture,
+  including offline configuration, exact file contents, retained originals,
+  unavailable destinations and detailed connection failure reporting.
+- Earlier public-host evidence used the former subprocess transport and does not
+  certify the new libcurl transport or pomf.lain.la. Public service validation of
+  this revision remains pending.
+
+Public-host tests are opt-in and use generated images only, never desktop
+captures. Host limits/retention and Google's browser endpoint may change.
+No extra confirmation dialogs are used: only explicitly chosen Upload/Lens
+actions transfer data. Cancellation cannot undo data already accepted remotely.
+Full browser/compositor interaction still needs real-session manual checks.
+
 ## Manual validation checklist
 
 Run for each compositor/version and record the version, output layout and result

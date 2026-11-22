@@ -5,7 +5,8 @@ import QtQuick.Layouts
 Item {
     id: root
     readonly property var audioController: controller
-    readonly property string statusMessage: controller.error.length ? controller.error : controller.pickMessage
+    readonly property string statusMessage: controller.error.length ? controller.error
+                                           : controller.pickMessage.length ? controller.pickMessage : controller.upload.error
     function showStatusMessage() {
         if (!errorToast) return
         errorToastTimer.stop()
@@ -20,6 +21,8 @@ Item {
     onStatusMessageChanged: showStatusMessage()
     function canUseResultShortcut(action) {
         if (root.editingOptions) return false
+        if (action === "upload" && (!controller.upload.available || controller.upload.busy || !controller.upload.destination.length)) return false
+        if (action === "edit" && !controller.editor.trim().length) return false
         if (action === "copy" && controller.action !== "capture") return false
         if (root.selecting)
             return (controller.action === "capture" || controller.action === "record") && controller.canConfirm
@@ -44,11 +47,13 @@ Item {
                 + Math.floor(seconds / 60 % 60).toString().padStart(2, "0") + ":"
                 + (seconds % 60).toString().padStart(2, "0")
     }
-    readonly property bool editingOptions: sessionSettings.visible || audioSelector.popup.visible || ocrLanguageSelector.popup.visible
+    readonly property bool editingOptions: audioSelector.popup.visible || ocrLanguageSelector.popup.visible
                                           || advancedMenu.visible || targetSelector.popup.visible
                                           || windowPicker.popup.visible || imageFormatSelector.popup.visible
                                           || videoFormatSelector.popup.visible || videoCodecSelector.popup.visible
-                                          || videoEncoderSelector.popup.visible
+                                           || videoEncoderSelector.popup.visible
+                                           || uploadDestinationSelector.popup.visible
+
     focus: true
     clip: true
     property real sx: width / outputRect.width
@@ -107,6 +112,19 @@ Item {
         enabled: !root.editingOptions
         context: Qt.WindowShortcut
         onActivated: controller.recordingControls ? controller.hideRecordingControls() : controller.cancel()
+    }
+    Shortcut {
+        sequences: controller.keybindings.upload
+        enabled: root.canUseResultShortcut("upload")
+        context: Qt.WindowShortcut
+        onActivated: root.useResultShortcut("upload")
+    }
+    Shortcut {
+        sequences: controller.keybindings.lens
+        enabled: !root.editingOptions && root.selecting && !controller.busy
+                 && controller.upload.available && !controller.upload.busy && controller.lensDestination.length > 0
+        context: Qt.WindowShortcut
+        onActivated: controller.setAction("lens")
     }
     Shortcut {
         sequences: controller.keybindings.save
@@ -296,6 +314,31 @@ Item {
     property bool recordCursorVisible: false
     property real toolbarX: Math.max(16, (width - 510) / 2)
     property real toolbarBottom: 14
+    Rectangle {
+        objectName: "uploadProgress"
+        visible: controller.upload.busy && root.selecting
+        x: Math.max(12, toolbar.x)
+        y: Math.max(12, toolbar.y - height - 8)
+        width: Math.min(root.width - 24, toolbar.width)
+        height: 40
+        z: 10
+        radius: theme.radius
+        color: theme.background
+        border.color: theme.borderColor
+        RowLayout {
+            anchors.fill: parent
+            anchors.margins: 6
+            Label {
+                Layout.fillWidth: true
+                text: controller.upload.status
+                textFormat: Text.PlainText
+                color: theme.foreground
+                elide: Text.ElideRight
+                font.pixelSize: theme.fontSize
+            }
+            Button { objectName: "cancelUpload"; text: "Cancel"; onClicked: controller.cancelUpload() }
+        }
+    }
     Timer {
         id: errorToastTimer
         interval: 5000
@@ -400,6 +443,13 @@ Item {
             }
             Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 18; color: theme.separatorColor }
                 IconButton {
+                    objectName: "cancelRecordingUpload"
+                    visible: controller.upload.busy
+                    glyph: "upload"
+                    tip: controller.upload.status + " · Cancel upload (keep recording)"
+                    onClicked: controller.cancelUpload()
+                }
+                IconButton {
                     objectName: "recordingPauseResume"
                     glyph: controller.recordingState === "Paused" ? "play" : "pause"
                     tip: controller.recordingState === "Paused" ? "Resume recording" : "Pause recording"
@@ -458,7 +508,7 @@ Item {
                     { label: "Save", icon: "image", action: "save" },
                     { label: "Copy", icon: "check", action: "copy" },
                     { label: "Upload", icon: "upload", action: "upload" },
-                    { label: "Edit", icon: "ocr", action: "edit" },
+                    { label: "Annotate", icon: "ocr", action: "edit" },
                     { label: "Open folder", icon: "window", action: "folder" },
                     { label: "Open picture", icon: "image", action: "open" },
                 ]
@@ -470,10 +520,15 @@ Item {
                     Layout.preferredHeight: 30
                     leftPadding: 10; rightPadding: 10
                     topPadding: 0; bottomPadding: 0
-                    enabled: modelData.action !== "upload" && (resultMenu.stopping
+                    enabled: (modelData.action !== "upload" || (controller.upload.available && !controller.upload.busy && controller.upload.destination.length > 0))
+                             && (modelData.action !== "edit" || controller.editor.trim().length > 0) && (resultMenu.stopping
                              ? !controller.pausePending && (controller.recordingState === "Paused" || controller.recordingState === "Recording")
                              : controller.canConfirm)
                     hoverEnabled: true
+                    ToolTip.visible: hovered && modelData.action === "upload"
+                    ToolTip.text: controller.upload.available
+                                  ? "Send to " + controller.upload.destinationLabel(controller.upload.destination)
+                                  : "Uploader unavailable to upload"
                     onClicked: {
                         resultMenu.close()
                         if (resultMenu.stopping) controller.stopWithAction(modelData.action)
@@ -534,6 +589,7 @@ Item {
         // Text-only settings selector: identical hit/hover area for every row.
         contentItem: Text {
             text: combo.displayText
+            textFormat: Text.PlainText
             horizontalAlignment: Text.AlignRight
             verticalAlignment: Text.AlignVCenter
             leftPadding: 8
@@ -727,6 +783,42 @@ Item {
                 objectName: "actionTier"
                 width: optionsScroll.availableWidth
                 spacing: 1
+                RowLayout {
+                    visible: controller.action === "capture" || controller.action === "record" || controller.action === "lens"
+                    Layout.fillWidth: true; Layout.preferredHeight: 30
+                    Label { text: controller.action === "lens" ? "Lens host" : "Upload to"; color: root.secondaryText; font.pixelSize: theme.fontSize; Layout.fillWidth: true }
+                    FlatCombo {
+                        id: uploadDestinationSelector
+                        objectName: "uploadDestinationSelector"
+                        Layout.preferredWidth: 146
+                        model: controller.upload.destinations
+                        textRole: "label"; valueRole: "id"
+                        currentIndex: {
+                            const id = controller.action === "lens" ? controller.lensDestination : controller.upload.destination
+                            for (let i = 0; i < controller.upload.destinations.length; ++i)
+                                if (controller.upload.destinations[i].id === id) return i
+                            return -1
+                        }
+                        displayText: currentIndex < 0 ? "Choose destination" : currentText
+                        enabled: !controller.busy && !controller.upload.busy
+                        onActivated: {
+                            if (controller.action === "lens") controller.lensDestination = currentValue
+                            else controller.upload.destination = currentValue
+                        }
+                        ToolTip.visible: hovered
+                        ToolTip.text: currentText
+                    }
+                }
+                Label {
+                    visible: controller.action === "lens"
+                    text: "Uploads to " + controller.upload.destinationLabel(controller.lensDestination)
+                          + ", then sends the public image URL to Google Lens."
+                    textFormat: Text.PlainText
+                    color: root.secondaryText
+                    font.pixelSize: theme.fontSize
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
                 RowLayout {
                     visible: controller.action === "ocr"
                     Layout.fillWidth: true; Layout.preferredHeight: 30
@@ -969,8 +1061,13 @@ Item {
                 IconButton {
                     objectName: "lensAction"
                     visible: !modeRow.compact
-                    glyph: "lens"; tip: "Google Lens · not implemented"
-                    enabled: false
+                    glyph: "lens"; tip: controller.upload.available
+                        ? "Google Lens · uploads via " + controller.upload.destinationLabel(controller.lensDestination)
+                        : "Uploader unavailable to use Google Lens"
+                    checkable: true; checked: controller.action === "lens"
+                    autoExclusive: true
+                    enabled: !controller.busy && controller.upload.available && !controller.upload.busy && controller.lensDestination.length > 0
+                    onClicked: controller.setAction("lens")
                 }
                 Item { Layout.fillWidth: true; Layout.minimumWidth: 4 }
                 IconButton {
@@ -979,11 +1076,7 @@ Item {
                     checkable: true; checked: root.optionsExpanded
                     onClicked: root.optionsExpanded = !root.optionsExpanded
                 }
-                IconButton {
-                    objectName: "sessionSettingsButton"
-                    glyph: "more"; tip: "Session settings"
-                    onClicked: sessionSettings.open()
-                }
+
                 Rectangle {
                     Layout.preferredWidth: 1; Layout.preferredHeight: 18
                     Layout.leftMargin: 4; Layout.rightMargin: 3
@@ -1028,7 +1121,7 @@ Item {
                     Button {
                         id: confirmAction
                         objectName: "confirmAction"
-                        text: controller.recording ? "Record" : controller.action === "qr" ? "Scan" : controller.action === "ocr" ? "OCR" : "Capture"
+                        text: controller.recording ? "Record" : controller.action === "qr" ? "Scan" : controller.action === "ocr" ? "OCR" : controller.action === "lens" ? "Lens" : "Capture"
                         enabled: controller.canConfirm
                         Layout.preferredWidth: modeRow.compact ? 34 : 75
                         Layout.preferredHeight: 29
@@ -1107,299 +1200,6 @@ Item {
                             y: -implicitHeight - 8
                         }
                     }
-                    }
-                }
-            }
-        }
-    }
-    // Session settings use the same flat controls and spacing as the toolbar.
-    Popup {
-        id: sessionSettings
-        objectName: "sessionSettings"
-        parent: Overlay.overlay
-        width: Math.max(0, Math.min(510, root.width - 32))
-        height: Math.max(0, Math.min(root.height - 24, settingsFields.implicitHeight + topPadding + bottomPadding))
-        x: Math.max(12, (root.width - width) / 2)
-        y: Math.max(12, Math.min(root.height - height - 12, toolbar.y - height - 8))
-        modal: true
-        focus: true
-        dim: false
-        leftPadding: 14
-        rightPadding: 14
-        topPadding: 12
-        bottomPadding: 12
-        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-        onOpened: {
-            savePath.text = controller.saveDirectory
-            nameTemplate.text = controller.filenameTemplate
-        }
-        background: Rectangle {
-            color: root.panelColor
-            radius: theme.radius + 2
-            border.width: 1
-            border.color: theme.borderColor
-        }
-        contentItem: ScrollView {
-            clip: true
-            contentWidth: availableWidth
-            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-            ColumnLayout {
-                id: settingsFields
-                width: sessionSettings.availableWidth
-                spacing: 5
-                RowLayout {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 28
-                    Text {
-                        text: "Session settings"
-                        font.pixelSize: 13
-                        font.bold: true
-                        color: root.panelText
-                        Layout.fillWidth: true
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                    Button {
-                        id: closeSessionSettings
-                        implicitWidth: 28
-                        implicitHeight: 28
-                        hoverEnabled: true
-                        onClicked: sessionSettings.close()
-                        ToolTip.visible: hovered
-                        ToolTip.text: "Close settings"
-                        background: Rectangle {
-                            radius: 6
-                            color: closeSessionSettings.hovered ? root.hoverColor : "transparent"
-                        }
-                        contentItem: Text {
-                            text: "×"
-                            color: root.secondaryText
-                            font.pixelSize: 19
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                    }
-                }
-                Text {
-                    text: "Changes apply to this session. Edit config.json to make them permanent."
-                    color: root.secondaryText
-                    font.pixelSize: 11
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                    Layout.bottomMargin: 9
-                }
-                Text {
-                    text: "Save directory"
-                    color: root.secondaryText
-                    font.pixelSize: theme.fontSize
-                    Layout.topMargin: 3
-                }
-                TextField {
-                    id: savePath
-                    objectName: "saveDirectoryField"
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 32
-                    selectByMouse: true
-                    enabled: !controller.busy
-                    font.pixelSize: theme.fontSize
-                    color: root.panelText
-                    selectionColor: theme.selectionColor
-                    selectedTextColor: root.panelText
-                    leftPadding: 10
-                    rightPadding: 10
-                    onEditingFinished: {
-                        controller.saveDirectory = text
-                        text = controller.saveDirectory
-                    }
-                    background: Rectangle {
-                        radius: 6
-                        color: theme.inputColor
-                        border.width: 1
-                        border.color: savePath.activeFocus ? theme.focusColor : theme.borderColor
-                    }
-                }
-                Text {
-                    text: "Filename template"
-                    color: root.secondaryText
-                    font.pixelSize: theme.fontSize
-                    Layout.topMargin: 10
-                }
-                TextField {
-                    id: nameTemplate
-                    objectName: "filenameTemplateField"
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 32
-                    selectByMouse: true
-                    enabled: !controller.busy
-                    font.pixelSize: theme.fontSize
-                    color: root.panelText
-                    selectionColor: theme.selectionColor
-                    selectedTextColor: root.panelText
-                    leftPadding: 10
-                    rightPadding: 10
-                    onEditingFinished: {
-                        controller.filenameTemplate = text
-                        text = controller.filenameTemplate
-                    }
-                    background: Rectangle {
-                        radius: 6
-                        color: theme.inputColor
-                        border.width: 1
-                        border.color: nameTemplate.activeFocus ? theme.focusColor : theme.borderColor
-                    }
-                }
-                Text {
-                    text: "File extension is added automatically"
-                    color: root.secondaryText
-                    opacity: 0.8
-                    font.pixelSize: 11
-                    Layout.topMargin: 1
-                    Layout.bottomMargin: 7
-                }
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 1
-                    Layout.topMargin: 5
-                    Layout.bottomMargin: 6
-                    color: theme.separatorColor
-                }
-                RowLayout {
-                    visible: !controller.recording
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 30
-                    Text {
-                        text: "Copy to clipboard"
-                        color: root.secondaryText
-                        font.pixelSize: theme.fontSize
-                        Layout.fillWidth: true
-                    }
-                    FlatCheck {
-                        Layout.preferredWidth: 40
-                        text: ""
-                        checked: controller.copyToClipboard
-                        enabled: !controller.busy
-                        onToggled: controller.copyToClipboard = checked
-                    }
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 30
-                    Text {
-                        text: "Show notifications"
-                        color: root.secondaryText
-                        font.pixelSize: theme.fontSize
-                        Layout.fillWidth: true
-                    }
-                    FlatCheck {
-                        Layout.preferredWidth: 40
-                        text: ""
-                        checked: controller.notificationsEnabled
-                        enabled: !controller.busy
-                        onToggled: controller.notificationsEnabled = checked
-                    }
-                }
-                RowLayout {
-                    visible: controller.recording
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 30
-                    Text {
-                        text: "Frame rate"
-                        color: root.secondaryText
-                        font.pixelSize: theme.fontSize
-                        Layout.fillWidth: true
-                    }
-                    FlatSpin {
-                        objectName: "recordingFps"
-                        from: 1; to: 120
-                        value: controller.recordingFps
-                        enabled: !controller.busy
-                        onValueModified: controller.recordingFps = value
-                    }
-                }
-                TextField {
-                    id: videoEditorField
-                    objectName: "videoEditorCommand"
-                    visible: controller.action === "capture" || controller.action === "record"
-                    Layout.fillWidth: true
-                    placeholderText: controller.recording ? "Video editor: losslesscut {}" : "Screenshot editor: satty --filename -"
-                    text: controller.editor
-                    color: root.panelText
-                    placeholderTextColor: root.secondaryText
-                    selectionColor: theme.selectionColor
-                    font.pixelSize: theme.fontSize
-                    enabled: !controller.busy
-                    selectByMouse: true
-                    onEditingFinished: controller.editor = text
-                    background: Rectangle {
-                        color: theme.inputColor; radius: 6
-                        border.color: videoEditorField.activeFocus ? theme.focusColor : theme.borderColor
-                    }
-                }
-                RowLayout {
-                    visible: controller.recording
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 30
-                    Text {
-                        text: "Delay (seconds)"
-                        color: root.secondaryText
-                        font.pixelSize: theme.fontSize
-                        Layout.fillWidth: true
-                    }
-                    FlatSpin {
-                        objectName: "recordingCountdown"
-                        from: 0; to: 30
-                        value: controller.countdownSeconds
-                        enabled: !controller.busy
-                        onValueModified: controller.countdownSeconds = value
-                    }
-                }
-                Text {
-                    visible: controller.pickMessage.length > 0
-                    text: controller.pickMessage
-                    textFormat: Text.PlainText
-                    color: root.secondaryText
-                    font.pixelSize: theme.fontSize
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                }
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 1
-                    Layout.topMargin: 8
-                    Layout.bottomMargin: 4
-                    color: theme.separatorColor
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 30
-                    Item { Layout.fillWidth: true }
-                    Button {
-                        id: doneSettings
-                        text: "Done"
-                        implicitWidth: 74
-                        implicitHeight: 30
-                        hoverEnabled: true
-                        onClicked: {
-                            // Commit pending text edits before closing the panel.
-                            if (controller.saveDirectory !== savePath.text)
-                                controller.saveDirectory = savePath.text
-                            if (controller.filenameTemplate !== nameTemplate.text)
-                                controller.filenameTemplate = nameTemplate.text
-                            if (controller.videoEditor !== videoEditorField.text)
-                                controller.videoEditor = videoEditorField.text
-                            sessionSettings.close()
-                        }
-                        background: Rectangle {
-                            radius: 6
-                            color: doneSettings.down ? theme.buttonPressedColor : doneSettings.hovered ? theme.buttonHoverColor : theme.buttonColor
-                        }
-                        contentItem: Text {
-                            text: doneSettings.text
-                            color: theme.buttonText
-                            font.pixelSize: theme.fontSize
-                            font.bold: true
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                        }
                     }
                 }
             }

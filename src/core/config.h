@@ -19,10 +19,12 @@ struct Config {
                          {"open", QStringList{"Ctrl+O"}},
                          {"folder", QStringList{"Ctrl+Shift+O"}},
                          {"edit", QStringList{"Ctrl+E"}},
+                         {"upload", QStringList{"Ctrl+U"}},
                          {"capture", QStringList{"Ctrl+1"}},
                          {"record", QStringList{"Ctrl+2"}},
                          {"qr", QStringList{"Ctrl+3"}},
                          {"ocr", QStringList{"Ctrl+4"}},
+                         {"lens", QStringList{"Ctrl+5"}},
                          {"region", QStringList{"Shift+1"}},
                          {"monitor", QStringList{"Shift+2"}},
                          {"window", QStringList{"Shift+3"}}};
@@ -30,6 +32,9 @@ struct Config {
   QString recordingCodec = "auto", recordingEncoder = "auto";
   QString screenshotEditor, videoEditor;
   QStringList ocrLanguages{"eng"};
+  QString uploadDestination = "catbox", lensDestination = "litterbox-1h";
+  QStringList uploaders;
+  int uploadTimeout = 180;
   int recordingFps = 30, countdown = 3, maxDuration = 3600;
   // Session-only audio preferences; these are not JSON configuration keys.
   bool systemAudio = false, microphone = false;

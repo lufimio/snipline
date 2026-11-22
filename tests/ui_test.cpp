@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QSvgRenderer>
 #include <QDesktopServices>
+#include <QUrlQuery>
 #include <QClipboard>
 #include <wayland-client.h>
 #include <QTemporaryDir>
@@ -155,6 +156,64 @@ class UiTest : public QObject {
         return nullptr;
     }
 private slots:
+
+
+    void configuredEditorsAreAvailableOnlyAfterSaving()
+    {
+        QTemporaryDir directory;
+        const auto executable = directory.filePath("editor");
+        QFile script(executable);
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write("#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$0.arg\"\n");
+        script.close();
+        QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        FakeRecorder recorder;
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier, nullptr, &recorder);
+        Config config;
+        config.notifications = false;
+        controller.configure(config);
+        QVERIFY(controller.Capture("region").isEmpty());
+        auto *view = selectorView();
+        QVERIFY(view);
+        selectionModel()->setRect({10, 10, 100, 100});
+        auto *arrow = view->rootObject()->findChild<QObject *>("advancedCapture");
+        QVERIFY(QMetaObject::invokeMethod(arrow, "clicked"));
+        QQuickItem *edit = nullptr;
+        QTRY_VERIFY((edit = visualItem(view->contentItem(), "resultAction_edit")));
+        QVERIFY(!edit->isEnabled());
+        controller.setEditor(executable + " {}");
+        QTRY_VERIFY(edit->isEnabled());
+        QVERIFY(QMetaObject::invokeMethod(edit, "clicked"));
+        const auto argument = [&] {
+            QFile file(executable + ".arg");
+            return file.open(QIODevice::ReadOnly) ? file.readAll().trimmed() : QByteArray{};
+        };
+        QTRY_COMPARE(argument(), controller.lastCapture().toUtf8());
+        QVERIFY(QFile::exists(controller.lastCapture()));
+        QVERIFY(QFile::remove(executable + ".arg"));
+        QVERIFY(controller.Record("monitor", "mp4", false, false).isEmpty());
+        controller.setVideoEditor(executable + " {}");
+        controller.setCountdownSeconds(0);
+        controller.confirmWithAction("edit");
+        barrier.acknowledge();
+        pixels.finish(Qt::green);
+        QCOMPARE(controller.recordingState(), "Recording");
+        QVERIFY(!QFile::exists(executable + ".arg"));
+        controller.Stop();
+        QVERIFY(!QFile::exists(executable + ".arg"));
+        const auto video = directory.filePath("recording with spaces.mp4");
+        QFile file(video);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("simulated finalized recording");
+        file.close();
+        recorder.finish(video);
+        QTRY_COMPARE(argument(), video.toUtf8());
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), QByteArray("simulated finalized recording"));
+    }
     void arrowActionShortcutsMatchMenuActions()
     {
         QTemporaryDir directory;
@@ -209,7 +268,7 @@ private slots:
         QTest::qWait(30);
         QTest::keyClick(view, Qt::Key_E, Qt::ControlModifier);
         QCOMPARE(recorder.starts, 0);
-        QVERIFY(controller.pickMessage().contains("editor"));
+        QVERIFY(controller.pickMessage().isEmpty()); // No configured editor: shortcut disabled.
         QTest::keyClick(view, Qt::Key_S, Qt::ControlModifier);
         barrier.acknowledge();
         pixels.finish(Qt::green);
@@ -651,7 +710,8 @@ private slots:
         QVERIFY(view);
         auto *root = view->rootObject();
         auto *lens = root->findChild<QQuickItem *>("lensAction");
-        QVERIFY(lens && lens->isVisible() && !lens->isEnabled());
+        QVERIFY(lens && lens->isVisible());
+        QCOMPARE(lens->isEnabled(), qobject_cast<Uploader *>(controller.upload())->available());
         QCOMPARE(lens->property("glyph").toString(), QString("lens"));
         for (const auto &action : {"capture", "record"}) {
             controller.setAction(action);
@@ -671,7 +731,8 @@ private slots:
             QTRY_VERIFY(menu->property("visible").toBool());
             QQuickItem *upload = nullptr;
             QTRY_VERIFY((upload = visualItem(view->contentItem(), "resultAction_upload")));
-            QVERIFY(upload->isVisible() && !upload->isEnabled());
+            QVERIFY(upload->isVisible());
+            QCOMPARE(upload->isEnabled(), qobject_cast<Uploader *>(controller.upload())->available());
             for (const auto &name : {"resultAction_open", "resultAction_upload"}) {
                 auto *row = visualItem(view->contentItem(), name);
                 QVERIFY(row);
@@ -896,7 +957,7 @@ private slots:
         auto *capture = root->findChild<QQuickItem *>("captureAction");
         QVERIFY(tier && actions && record && capture);
         auto *settingsButton = root->findChild<QQuickItem *>("sessionSettingsButton");
-        QVERIFY(settingsButton && settingsButton->parentItem() == tier);
+        QVERIFY(!settingsButton);
         QVERIFY(capture->property("text").toString().isEmpty());
         QVERIFY(tier->mapToScene({0, 0}).y() >= actions->mapToScene({0, actions->height()}).y() - 1);
         QVERIFY(root->findChild<QQuickItem *>("qrAction")->isEnabled());
@@ -948,12 +1009,7 @@ private slots:
         QTRY_VERIFY(!audio->property("visible").toBool());
         QTRY_COMPARE(arrow->property("rotation").toInt(), 0);
         auto *settings = root->findChild<QObject *>("sessionSettings");
-        QVERIFY(settings);
-        QVERIFY(QMetaObject::invokeMethod(settings, "open"));
-        QTRY_VERIFY(settings->property("visible").toBool());
-        QTRY_VERIFY(settings->property("activeFocus").toBool());
-        QTest::keyClick(view, Qt::Key_Escape); // Close settings, not the entire capture.
-        QTRY_VERIFY(!settings->property("visible").toBool());
+        QVERIFY(!settings);
         QVERIFY(controller.recording());
         QTest::mouseClick(view, Qt::LeftButton, Qt::NoModifier,
                          capture->mapToScene({capture->width() / 2, capture->height() / 2}).toPoint());

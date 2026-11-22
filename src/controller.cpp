@@ -14,6 +14,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QMimeData>
+#include <QMimeDatabase>
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QScreen>
@@ -48,8 +49,9 @@ QImage FrameProvider::requestImage(const QString &id, QSize *size,
 
 Controller::Controller(QString directory, QByteArray format, QString themePath,
                        QObject *parent, CaptureBackend *capture, WindowBackend *windows,
-                        SurfaceBarrier *barrier, WindowPicker *picker, VideoRecorder *recorder, AudioSources *audio)
-    : QObject(parent), m_audioSources(audio ? audio : new AudioSources(this)),
+                         SurfaceBarrier *barrier, WindowPicker *picker, VideoRecorder *recorder, AudioSources *audio, Uploader *upload)
+     : QObject(parent), m_audioSources(audio ? audio : new AudioSources(this)),
+       m_upload(upload ? upload : new Uploader(this)),
       m_recorder(recorder ? recorder : new VideoRecorder(this)),
        m_directory(std::move(directory)), m_recordDirectory(m_directory),
       m_format(std::move(format)),
@@ -66,6 +68,48 @@ Controller::Controller(QString directory, QByteArray format, QString themePath,
         if (m_sessionLocked) return;
         QString error;
         if (!launchEditor(command, path, &error)) notify("Could not start editor", error + "\nSaved to " + path);
+      });
+  connect(&m_savedNotifications, &NotificationActions::fileOpenRequested, this,
+      [this](const QString &path, bool folder) {
+        if (!m_sessionLocked) openResult(path, folder ? "folder" : "open");
+      });
+  connect(&m_savedNotifications, &NotificationActions::openRequested, this, [this](const QUrl &url) {
+    if (!m_sessionLocked) QDesktopServices::openUrl(url);
+  });
+  connect(&m_savedNotifications, &NotificationActions::uploadRequested, this,
+      [this](const QString &path, const QString &destination, bool lens) { beginUpload(path, destination, lens); });
+  connect(&m_savedNotifications, &NotificationActions::cancelRequested, this, [this](quint64 token) {
+    if (token == m_uploadToken) m_upload->cancel();
+  });
+  connect(m_upload, &Uploader::changed, this, &Controller::changed);
+  connect(m_upload, &Uploader::failed, this, [this](const QString &error) {
+    m_savedNotifications.closeProgress(m_uploadToken);
+    if (!m_sessionLocked) notify("Upload failed", error);
+  });
+  connect(m_upload, &Uploader::cancelled, this, [this] {
+    m_savedNotifications.closeProgress(m_uploadToken);
+    if (!m_sessionLocked) notify("Upload cancelled", "The saved file was kept. Data already received by the host may remain there.");
+  });
+  connect(m_upload, &Uploader::completed, this,
+      [this](const QUrl &url, const QString &, const QString &destination, bool lens) {
+        m_savedNotifications.closeProgress(m_uploadToken);
+        if (m_sessionLocked) return;
+        QUrl open = url;
+        QString body;
+        if (lens) {
+          open = QUrl("https://lens.google.com/uploadbyurl?ep=gisbubu&url=" +
+                      QString::fromLatin1(QUrl::toPercentEncoding(url.toString(QUrl::FullyEncoded))));
+          body = "Image uploaded via " + m_upload->destinationLabel(destination) + "; sent to Google Lens.";
+          if (!QDesktopServices::openUrl(open)) body += " Could not launch the browser; use Open to try again.";
+        } else {
+          auto *clipboard = QGuiApplication::clipboard();
+          if (clipboard) clipboard->setText(url.toString(QUrl::FullyEncoded));
+          body = m_upload->destinationLabel(destination) + "\n" + url.toString(QUrl::FullyEncoded)
+                 + (clipboard ? "\nLink copied to the clipboard." : "\nClipboard unavailable.");
+        }
+        if (m_config.notifications)
+          m_savedNotifications.show(lens ? "Google Lens" : "Upload complete", body,
+              m_config.notificationTimeout, open);
       });
   m_transitionTimeout.setSingleShot(true);
   connect(&m_transitionTimeout, &QTimer::timeout, this, [this] {
@@ -148,10 +192,13 @@ Controller::Controller(QString directory, QByteArray format, QString themePath,
     const bool quit = m_quitAfterRecording;
     const auto postAction = m_postRecordingAction;
     const auto editorCommand = m_config.videoEditor;
+    const auto uploadDestination = m_postUploadDestination;
     release();
-    openResult(path, postAction, editorCommand);
+    openResult(path, postAction, editorCommand, uploadDestination);
     qInfo().noquote() << body;
-    notifySaved("Recording saved", body, path, editorCommand, false);
+    if (postAction != "upload" && postAction != "lens" && postAction != "edit"
+        && postAction != "open" && postAction != "folder")
+      notifySaved("Recording saved", body, path, editorCommand, false);
     if (quit) QGuiApplication::quit();
   });
   connect(m_recorder, &VideoRecorder::failed, this, [this](quint64 generation, const QString &message) {
@@ -273,6 +320,10 @@ Controller::Controller(QString directory, QByteArray format, QString themePath,
 }
 
 Controller::~Controller() {
+  const bool blocked = m_upload->blockSignals(true);
+  m_upload->cancel();
+  m_upload->blockSignals(blocked);
+  m_savedNotifications.closeProgress(m_uploadToken);
   m_recognition.clear();
   restoreTransitionSurfaces();
   m_audioTimer.stop();
@@ -393,8 +444,8 @@ bool Controller::selectionOptionsEditable() const {
 }
 void Controller::setAction(const QString &action) {
   if (!selectionOptionsEditable() || action == this->action() ||
-      (action != "capture" && action != "record" && action != "qr" && action != "ocr")) return;
-  m_recognitionAction = (action == "qr" || action == "ocr") ? action : QString{};
+      (action != "capture" && action != "record" && action != "qr" && action != "ocr" && action != "lens")) return;
+  m_recognitionAction = (action == "qr" || action == "ocr" || action == "lens") ? action : QString{};
   m_recognition.prepare(action);
   if (action == "ocr" && m_recognition.languages().isEmpty()) m_recognition.refreshLanguages();
   m_pickMessage.clear();
@@ -773,6 +824,8 @@ void Controller::finishWindowPick(const QStringList &ids, const QString &message
 
 bool Controller::canConfirm() const {
   if (m_busy || !m_error.isEmpty() || m_phase != Phase::Selecting || !m_provider) return false;
+  if (m_recognitionAction == "lens" && (!m_upload->available() || m_upload->busy() ||
+      !m_upload->hasDestination(m_config.lensDestination))) return false;
   if (m_mode == "window")
     return !m_windowId.isEmpty() && windowUnavailable().isEmpty()
         && (m_live || !m_provider->window.isNull());
@@ -810,11 +863,16 @@ void Controller::setEditor(const QString &command) {
 }
 bool Controller::validateResultAction(const QString &action, bool video) {
   if (action != "capture" && action != "save" && action != "folder" &&
-      action != "open" && action != "edit" && (video || action != "copy")) return false;
+      action != "open" && action != "edit" && action != "upload" && (video || action != "copy")) return false;
+  if (action == "upload" && (!m_upload->available() || m_upload->busy() || !m_upload->hasDestination(m_upload->destination()))) {
+    m_pickMessage = "Select an available upload destination; only one upload can run at a time.";
+    emit changed();
+    return false;
+  }
   const auto command = video ? m_config.videoEditor : m_config.screenshotEditor;
   if (action == "edit" && command.trimmed().isEmpty()) {
-    m_pickMessage = video ? "Set a video editor command in Session settings first."
-                         : "Set a screenshot editor command in Session settings first.";
+    m_pickMessage = video ? "Configure recording.editor in config.json first."
+                         : "Configure screenshots.editor in config.json first.";
     emit changed();
     return false;
   }
@@ -822,16 +880,19 @@ bool Controller::validateResultAction(const QString &action, bool video) {
 }
 void Controller::confirmWithAction(const QString &action) {
   if (!canConfirm() || !validateResultAction(action, m_recording)) return;
+  if (action == "upload") m_postUploadDestination = m_upload->destination();
   if (m_recording) m_postRecordingAction = action;
   else m_captureDisposition = action;
   confirm();
 }
 void Controller::stopWithAction(const QString &action) {
   if (!m_recording || !validateResultAction(action, true)) return;
+  if (action == "upload") m_postUploadDestination = m_upload->destination();
   m_postRecordingAction = action;
   Stop();
 }
-void Controller::openResult(const QString &path, const QString &action, const QString &editorCommand) {
+void Controller::openResult(const QString &path, const QString &action, const QString &editorCommand,
+                             const QString &uploadDestination) {
   if (m_sessionLocked) return;
   if (action == "folder" || action == "open") {
     if (!QDesktopServices::openUrl(QUrl::fromLocalFile(
@@ -841,13 +902,21 @@ void Controller::openResult(const QString &path, const QString &action, const QS
     QString error;
     if (!launchEditor(editorCommand, path, &error))
       notify("Could not start editor", error + "\nSaved to " + path);
+  } else if (action == "upload" || action == "lens") {
+    beginUpload(path, uploadDestination, action == "lens");
   }
 }
 void Controller::notifySaved(const QString &title, const QString &body, const QString &path,
                              const QString &editorCommand, bool image) {
   if (!m_config.notifications) return;
-  m_savedNotifications.showEditor(title, body, m_config.notificationTimeout,
-      path, m_sessionLocked ? QString{} : editorCommand, image);
+  const bool transferable = !m_sessionLocked && m_upload->available() && !m_upload->busy();
+  const auto upload = transferable ? m_upload->resolveDestination(m_upload->destination()) : QString{};
+  const QString lens;
+  QString details = body;
+  if (!upload.isEmpty()) details += "\nUpload: " + m_upload->destinationLabel(upload);
+  if (!lens.isEmpty()) details += "\nLens sends this image to Google via " + m_upload->destinationLabel(lens);
+  m_savedNotifications.showSaved(title, details, m_config.notificationTimeout,
+      path, m_sessionLocked ? QString{} : editorCommand, image, upload, lens);
 }
 void Controller::confirm() {
   if (!canConfirm()) return;
@@ -939,7 +1008,7 @@ void Controller::commit() {
 }
 
 void Controller::save(const QImage &image) {
-  if (!m_recognitionAction.isEmpty()) {
+  if (m_recognitionAction == "qr" || m_recognitionAction == "ocr") {
     const auto kind = m_recognitionAction;
     const QImage input = image;
     release();
@@ -961,7 +1030,7 @@ void Controller::save(const QImage &image) {
     return;
   }
   auto *clipboard = QGuiApplication::clipboard();
-  const bool shouldCopy = m_config.clipboard && m_captureDisposition == "capture";
+  const bool shouldCopy = m_config.clipboard && m_captureDisposition == "capture" && m_recognitionAction != "lens";
   if (clipboard && shouldCopy)
     clipboard->setImage(image);
   const bool copied =
@@ -971,14 +1040,59 @@ void Controller::save(const QImage &image) {
           ? QStringLiteral("Copied and saved to %1").arg(saved.path)
           : QStringLiteral("Saved to %1, but copying failed.").arg(saved.path);
   qInfo().noquote() << body;
-  const auto postAction = m_captureDisposition;
+  const auto postAction = m_recognitionAction == "lens" ? QString("lens") : m_captureDisposition;
   const auto editorCommand = m_config.screenshotEditor;
+  const auto uploadDestination = postAction == "lens" ? m_upload->resolveDestination(m_config.lensDestination) : m_postUploadDestination;
   m_lastCapture = saved.path;
   release();
-  openResult(saved.path, postAction, editorCommand);
-  notifySaved((copied || !shouldCopy) ? QStringLiteral("Screenshot saved")
+  openResult(saved.path, postAction, editorCommand, uploadDestination);
+  if (postAction != "upload" && postAction != "lens" && postAction != "edit"
+      && postAction != "open" && postAction != "folder")
+    notifySaved((copied || !shouldCopy) ? QStringLiteral("Screenshot saved")
                 : QStringLiteral("Clipboard error"),
           body, saved.path, editorCommand, true);
+}
+
+void Controller::setLensDestination(const QString &destination) {
+  if (!selectionOptionsEditable() || !m_upload->hasDestination(destination)) return;
+  m_config.lensDestination = m_upload->resolveDestination(destination);
+  emit changed();
+}
+QString Controller::beginUpload(const QString &path, const QString &destination, bool lens) {
+  const auto reject = [this](const QString &error) {
+    if (!m_sessionLocked) notify("Upload unavailable", error);
+    return error;
+  };
+  if (m_sessionLocked) return reject("Cannot upload while the session is locked.");
+  if (m_upload->busy()) return reject("An upload is already running. Cancel it or wait for it to finish.");
+  ++m_uploadToken;
+  const auto mime = QMimeDatabase().mimeTypeForFile(path, QMimeDatabase::MatchContent).name();
+  m_uploadImage = mime.startsWith("image/");
+  m_uploadEditor = m_uploadImage ? m_config.screenshotEditor : mime.startsWith("video/") ? m_config.videoEditor : QString{};
+  if (!m_upload->start(path, destination, lens, m_config.uploadTimeout * 1000)) return m_upload->error();
+  if (m_config.notifications)
+    m_savedNotifications.showProgress(lens ? "Uploading for Google Lens" : "Uploading",
+        QFileInfo(path).fileName() + "\n" + m_upload->status(), m_uploadToken);
+  return {};
+}
+QString Controller::Upload(const QString &file, const QString &destination) {
+  return beginUpload(QFileInfo(file).absoluteFilePath(), destination.isEmpty() ? m_upload->destination() : destination, false);
+}
+QString Controller::Lens(const QString &target, const QString &file, int live) {
+  if (live < -1 || live > 1) return "Capture timing must be -1 (config default), 0 (frozen) or 1 (live).";
+  if (m_sessionLocked) return "Cannot search with Lens while the session is locked.";
+  if (!file.isEmpty()) {
+    if (live != -1) return "Live/frozen timing cannot be used with an existing image.";
+    return beginUpload(QFileInfo(file).absoluteFilePath(), m_config.lensDestination, true);
+  }
+  if (m_upload->busy()) return "An upload is already running.";
+  if (!m_upload->hasDestination(m_config.lensDestination)) return "Choose an available Lens upload destination.";
+  if (m_recording || m_busy || !m_views.empty()) return "A capture or recording is already active.";
+  const auto error = CaptureWithMode(target.isEmpty() ? "region" : target, live < 0 ? m_config.live : bool(live));
+  if (!error.isEmpty()) return error;
+  m_recognitionAction = "lens";
+  emit changed();
+  return {};
 }
 
 QString Controller::Recognize(const QString &kind, const QString &target, const QString &file) {
@@ -1066,6 +1180,7 @@ bool Controller::openCode(int index) {
 }
 
 void Controller::cancel() {
+  m_upload->cancel();
   closeRecognition();
   if (m_recording) m_recordSession.discard();
   release();
@@ -1080,6 +1195,7 @@ void Controller::hideRecordingControls() {
 }
 
 void Controller::release() {
+  m_postUploadDestination.clear();
   m_recognitionAction.clear();
   m_captureDisposition = "capture";
   m_postRecordingAction.clear();
@@ -1150,7 +1266,8 @@ void Controller::fail(const QString &message) {
 void Controller::notify(const QString &title, const QString &body, const QString &imagePath) {
   if (!m_config.notifications) return;
   QDBusConnection::sessionBus().asyncCall(
-      screenshotNotification(title, body, imagePath, m_config.notificationTimeout));
+      screenshotNotification(title, body, imagePath,
+          title == "Upload failed" ? (m_config.notificationTimeout > 0 ? m_config.notificationTimeout : 5000) : m_config.notificationTimeout));
 }
 
 QString Controller::Record(const QString &mode, const QString &format, bool systemAudioValue, bool microphoneValue) {
@@ -1382,6 +1499,8 @@ QString Controller::Status() const {
       {"elapsedMs", m_recordSession.elapsedMs()},
       {"countdown", m_recordSession.countdownRemaining()},
       {"audio", QJsonArray::fromVariantList(m_recorder->audioDiagnostics())},
+      {"upload", QJsonObject{{"busy", m_upload->busy()}, {"status", m_upload->status()},
+                             {"url", m_upload->url().toString()}, {"error", m_upload->error()}}},
       {"path", m_lastRecordingPath}, {"error", m_lastRecordingError},
       {"warning", m_recordWarning}}).toJson(QJsonDocument::Compact));
 }
@@ -1461,6 +1580,7 @@ void Controller::SessionLocked() {
   m_sessionLocked = true;
   m_recognitionNotifications.invalidate();
   m_savedNotifications.invalidate();
+  m_upload->cancel();
   closeRecognition();
   if (!m_recognitionAction.isEmpty()) release();
   if (m_recording) {
