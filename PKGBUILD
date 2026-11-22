@@ -8,7 +8,7 @@ pkgdesc='Wayland screenshot, recording, QR and OCR selector'
 arch=('x86_64')
 url='https://github.com/OWNER/REPOSITORY'
 license=('MIT')
-depends=('curl' 
+depends=('curl'
   'gcc-libs' 'glibc'
   'qt6-base>=6.5' 'qt6-declarative' 'qt6-wayland' 'qt6-svg'
   'layer-shell-qt' 'wayland' 'grim'
@@ -18,12 +18,8 @@ depends=('curl'
 makedepends=('cmake>=3.24' 'ninja' 'pkgconf' 'wayland-protocols>=1.41' 'hyprland-protocols>=0.8')
 optdepends=(
   'tesseract: OCR recognition'
-  'tesseract-data-eng: English OCR model; install other language packages as needed'
-  'satty: optional screenshot editor'
   'ffmpeg: GIF export'
   'gst-plugins-bad: optional hardware encoders and additional codecs'
-  'hyprland: supported Wayland compositor'
-  'niri: supported Wayland compositor with compatible capture protocols'
 )
 options=('!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
