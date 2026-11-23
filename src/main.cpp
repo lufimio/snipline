@@ -1,6 +1,6 @@
 #include "controller.h"
-#include "doctor.h"
 #include "desktop.h"
+#include "doctor.h"
 #include <QApplication>
 
 #include <QCommandLineParser>
@@ -12,19 +12,45 @@
 #include <QDir>
 #include <QGuiApplication>
 #include <QQuickStyle>
+#include <QSocketNotifier>
 #include <QStandardPaths>
 #include <QTextStream>
 #include <QTimer>
-#include <QSocketNotifier>
-#include <csignal>
 #include <cerrno>
+#include <csignal>
 #include <fcntl.h>
 #include <unistd.h>
 
 namespace {
 constexpr auto service = "io.github.snipline.Application";
 constexpr auto objectPath = "/io/github/snipline/Application";
+
+bool isRecognitionCommand(const QString &command) {
+  return command == "qr" || command == "ocr";
+}
+
+bool supportsScreenshotTiming(const QString &command) {
+  return command == "capture" || isRecognitionCommand(command) || command == "lens";
+}
+
+bool isTopLevelControlCommand(const QString &command) {
+  return command == "cancel" || command == "quit" || command == "recent" || command == "forget";
+}
+
+// D-Bus uses -1 to preserve the configured default, 0 for off and 1 for on.
+int booleanOverride(const QCommandLineParser &parser, const QString &enableOption,
+                    const QString &disableOption) {
+  if (parser.isSet(enableOption)) {
+    return 1;
+  }
+  if (parser.isSet(disableOption)) {
+    return 0;
+  }
+  return -1;
+}
+
 volatile std::sig_atomic_t terminationPipe = -1;
+
 void terminationSignal(int) {
   const int savedErrno = errno;
   if (terminationPipe >= 0) {
@@ -39,7 +65,9 @@ void terminationSignal(int) {
 class TerminationSignals {
 public:
   explicit TerminationSignals(snip::Controller &controller) {
-    if (::pipe2(m_fds, O_NONBLOCK | O_CLOEXEC) != 0) return;
+    if (::pipe2(m_fds, O_NONBLOCK | O_CLOEXEC) != 0) {
+      return;
+    }
     terminationPipe = m_fds[1];
     struct sigaction action{};
     action.sa_handler = terminationSignal;
@@ -48,14 +76,19 @@ public:
     sigaction(SIGINT, &action, &m_oldInt);
     sigaction(SIGTERM, &action, &m_oldTerm);
     m_notifier = std::make_unique<QSocketNotifier>(m_fds[0], QSocketNotifier::Read);
-    QObject::connect(m_notifier.get(), &QSocketNotifier::activated, &controller, [&controller, this] {
-      char buffer[32];
-      while (::read(m_fds[0], buffer, sizeof(buffer)) > 0) {}
-      controller.Quit(); // Finalize a running video, discard an unstarted selection.
-    });
+    QObject::connect(
+        m_notifier.get(), &QSocketNotifier::activated, &controller, [&controller, this] {
+          char buffer[32];
+          while (::read(m_fds[0], buffer, sizeof(buffer)) > 0) {
+          }
+          controller.Quit(); // Finalize a running video, discard an unstarted selection.
+        });
   }
+
   ~TerminationSignals() {
-    if (m_fds[0] < 0) return;
+    if (m_fds[0] < 0) {
+      return;
+    }
     sigaction(SIGINT, &m_oldInt, nullptr);
     sigaction(SIGTERM, &m_oldTerm, nullptr);
     terminationPipe = -1;
@@ -63,39 +96,43 @@ public:
     ::close(m_fds[0]);
     ::close(m_fds[1]);
   }
+
 private:
   int m_fds[2]{-1, -1};
   struct sigaction m_oldInt{}, m_oldTerm{};
   std::unique_ptr<QSocketNotifier> m_notifier;
 };
 
-void configure(QCommandLineParser &parser, const QString &scope = {}, bool targetSpecified = false) {
-  parser.setApplicationDescription(
-      "Snipline — Wayland screenshots and recording");
+void configure(QCommandLineParser &parser, const QString &scope = {},
+               bool targetSpecified = false) {
+  parser.setApplicationDescription("Snipline — Wayland screenshots and recording");
   parser.addHelpOption();
   parser.addVersionOption();
-  if (scope == "control" || scope == "doctor") return;
-  parser.addOption({"tray", "Show the optional system tray icon for this resident instance."});
-  if (scope.isEmpty() || scope == "upload" || ((scope == "qr" || scope == "ocr" || scope == "lens") && !targetSpecified))
-    parser.addOption({"file", "Use an existing file (upload) or image (qr/ocr/lens).", "path"});
-  if (scope.isEmpty() || scope == "upload")
-    parser.addOption({"service", "Upload destination: catbox, litterbox-1h/12h/24h/72h, pomf or sxcu:Name.", "destination"});
-  if (scope.isEmpty() || scope == "capture" || scope == "qr" || scope == "ocr" || scope == "lens") {
-    parser.addOption({"live", "Select over the live desktop; acquire pixels only "
-                             "after confirmation."});
-    parser.addOption(
-         {"frozen", "Select over a frozen frame."});
+  if (scope == "control" || scope == "doctor") {
+    return;
   }
-  parser.addOption({"config",
-                    "Load a JSON configuration file.",
-                    "path"});
-  parser.addOption(
-      {"directory", "Set the screenshot and recording output directories.", "path"});
-  if (scope.isEmpty() || scope == "capture" || scope == "daemon")
-    parser.addOption(
-        {"format", "Screenshot format: png, jpeg or webp.", "format"});
-  parser.addOption(
-      {"theme", "Load a JSON theme file.", "path"});
+  parser.addOption({"tray", "Show the optional system tray icon for this resident instance."});
+  const bool acceptsImageFile =
+      (isRecognitionCommand(scope) || scope == "lens") && !targetSpecified;
+  if (scope.isEmpty() || scope == "upload" || acceptsImageFile) {
+    parser.addOption({"file", "Use an existing file (upload) or image (qr/ocr/lens).", "path"});
+  }
+  if (scope.isEmpty() || scope == "upload") {
+    parser.addOption({"service",
+                      "Upload destination: catbox, litterbox-1h/12h/24h/72h, pomf or sxcu:Name.",
+                      "destination"});
+  }
+  if (scope.isEmpty() || supportsScreenshotTiming(scope)) {
+    parser.addOption({"live", "Select over the live desktop; acquire pixels only "
+                              "after confirmation."});
+    parser.addOption({"frozen", "Select over a frozen frame."});
+  }
+  parser.addOption({"config", "Load a JSON configuration file.", "path"});
+  parser.addOption({"directory", "Set the screenshot and recording output directories.", "path"});
+  if (scope.isEmpty() || scope == "capture" || scope == "daemon") {
+    parser.addOption({"format", "Screenshot format: png, jpeg or webp.", "format"});
+  }
+  parser.addOption({"theme", "Load a JSON theme file.", "path"});
   if (scope.isEmpty() || scope == "record") {
     parser.addOption({"video-format", "Recording format: mp4, webm or gif.", "format"});
     parser.addOption({"codec", "Video codec: auto, h264, h265, vp8, vp9 or av1.", "codec"});
@@ -108,21 +145,28 @@ void configure(QCommandLineParser &parser, const QString &scope = {}, bool targe
 }
 
 bool showCommandHelp(QStringList path) {
-  if (path.value(0) == "help") path.removeFirst();
+  if (path.value(0) == "help") {
+    path.removeFirst();
+  }
   const auto root = path.value(0);
   const auto child = path.value(1);
   const QStringList targets{"region", "monitor", "window"};
   const QStringList controls{"pause", "resume", "stop", "discard", "status"};
-  const QStringList roots{"capture", "record", "qr", "ocr", "lens", "upload", "daemon", "cancel", "quit", "doctor", "recent", "forget"};
+  const QStringList roots{"capture", "record", "qr",   "ocr",    "lens",   "upload",
+                          "daemon",  "cancel", "quit", "doctor", "recent", "forget"};
   if (path.size() > 2 || (!root.isEmpty() && !roots.contains(root)) ||
-        (!child.isEmpty() && (root != "capture" && root != "record" && root != "qr" && root != "ocr" && root != "lens")) ||
-      (!child.isEmpty() && !targets.contains(child) && !(root == "record" && controls.contains(child))))
+      (!child.isEmpty() && (root != "capture" && root != "record" && root != "qr" &&
+                            root != "ocr" && root != "lens")) ||
+      (!child.isEmpty() && !targets.contains(child) &&
+       !(root == "record" && controls.contains(child)))) {
     return false;
+  }
   QTextStream out(stdout);
-  const bool recognition = root == "qr" || root == "ocr";
+  const bool recognition = isRecognitionCommand(root);
   const bool lens = root == "lens";
   const bool recordingControl = root == "record" && controls.contains(child);
-  const bool selecting = root == "capture" || recognition || lens || (root == "record" && !recordingControl);
+  const bool selecting =
+      root == "capture" || recognition || lens || (root == "record" && !recordingControl);
   if (root.isEmpty()) {
     out << "Usage: snipline <command> [options]\n"
            "       snipline [capture-options]  (defaults to capture)\n"
@@ -137,9 +181,9 @@ bool showCommandHelp(QStringList path) {
            "  upload --file <path>    Upload an existing file and copy its URL\n"
            "  lens [target]           Upload an image and search with Google Lens\n"
            "  lens --file <path>      Search with an existing local image\n"
-            "  daemon                  Start the resident instance without a selector\n"
-            "  recent                  Print bounded recent-file metadata as JSON\n"
-            "  forget                  Forget recent metadata without deleting files\n"
+           "  daemon                  Start the resident instance without a selector\n"
+           "  recent                  Print bounded recent-file metadata as JSON\n"
+           "  forget                  Forget recent metadata without deleting files\n"
            "  cancel                  Cancel selection/recognition/upload or discard recording\n"
            "  quit                    Finalize recording and quit the resident instance\n"
            "  doctor                  Print JSON capability diagnostics; no capture\n"
@@ -150,8 +194,11 @@ bool showCommandHelp(QStringList path) {
            "Options below are an overview, not valid with every command. Use\n"
            "'snipline <command> --help' for applicable options.\n\n";
   } else if (selecting) {
-    out << "Usage: snipline " << root << (child.isEmpty() ? " [target]" : " " + child) << " [options]\n";
-    if ((recognition || lens) && child.isEmpty()) out << "       snipline " << root << " --file <path> [options]\n";
+    out << "Usage: snipline " << root << (child.isEmpty() ? " [target]" : " " + child)
+        << " [options]\n";
+    if ((recognition || lens) && child.isEmpty()) {
+      out << "       snipline " << root << " --file <path> [options]\n";
+    }
     out << "\nPositional arguments:\n";
     if (child.isEmpty()) {
       out << "  target                  region | monitor | window (optional)\n"
@@ -160,16 +207,19 @@ bool showCommandHelp(QStringList path) {
              "    window                Select an isolated application window\n\n";
     } else {
       out << "  None after '" << child << "'. This command "
-          << (child == "region" ? "selects a rectangle." : child == "monitor" ? "selects one output." : "selects an isolated application window.")
+          << (child == "region"    ? "selects a rectangle."
+              : child == "monitor" ? "selects one output."
+                                   : "selects an isolated application window.")
           << "\n\n";
     }
-    if (root == "record" && child.isEmpty())
+    if (root == "record" && child.isEmpty()) {
       out << "Subcommands:\n"
              "  Use instead of a target; '<control> --help' shows details.\n"
              "  pause, resume           Toggle running/paused state (both the same toggle)\n"
              "  stop                    Finalize and save\n"
              "  discard                 Discard without saving\n"
              "  status                  Print recording state/elapsed time as JSON\n\n";
+    }
     out << "Behavior:\n  ";
     if (root == "record") {
       out << "Recording selection is always live.\n"
@@ -179,42 +229,50 @@ bool showCommandHelp(QStringList path) {
              "  GIF uses software; hardware is optional and preflighted before recording.\n";
     } else {
       out << "--live and --frozen select timing for this request and conflict.\n";
-      if (recognition)
+      if (recognition) {
         out << "  No cursor is captured. Results copy automatically; no results window.\n"
                "  Links open only through an explicit notification action.\n"
                "  --file cannot be combined with a target, --live or --frozen.\n";
-      if (lens)
+      }
+      if (lens) {
         out << "  Sends the image to the selected host, then its public URL to Google.\n"
                "  Opens Lens without an extra confirmation dialog. No automatic searches.\n"
                "  --file cannot be combined with a target, --live or --frozen.\n"
                "  Existing images must be PNG, JPEG, WebP or GIF, at most 20 MiB.\n";
+      }
     }
     out << "  Explicitly confirm to save, recognize or start recording; Escape cancels.\n\n";
   } else {
     out << "Usage: snipline " << root << (child.isEmpty() ? "" : " " + child)
-        << (root == "upload" ? " --file <path>" : "") << " [options]\n\n"
+        << (root == "upload" ? " --file <path>" : "")
+        << " [options]\n\n"
            "Positional arguments: none after the command shown above.\n\n";
-    if (child == "pause" || child == "resume")
+    if (child == "pause" || child == "resume") {
       out << "Toggle running → paused or paused → running. Both use the same toggle.\n"
              "No active recording is an error.\n\n";
-    else if (child == "stop") out << "Finalize/save the active recording. No active recording is an error.\n\n";
-    else if (child == "discard" || root == "cancel")
+    } else if (child == "stop") {
+      out << "Finalize/save the active recording. No active recording is an error.\n\n";
+    } else if (child == "discard" || root == "cancel") {
       out << "Cancel selection/recognition/upload or discard recording without saving.\n"
              "No running instance is a successful no-op.\n\n";
-    else if (child == "status")
+    } else if (child == "status") {
       out << "Print JSON recording state, elapsed time and output/error details.\n"
              "Without a running instance, reports Idle; does not start one.\n\n";
-    else if (root == "quit") out << "Finalize recording and quit. No instance is a successful no-op.\n\n";
-    else if (root == "daemon") out << "Start the resident instance; no selector opens. Already running: no-op.\n\n";
-    else if (root == "doctor") out << "Print JSON capabilities without requesting pixels or recording streams.\n\n";
-    else if (root == "upload")
+    } else if (root == "quit") {
+      out << "Finalize recording and quit. No instance is a successful no-op.\n\n";
+    } else if (root == "daemon") {
+      out << "Start the resident instance; no selector opens. Already running: no-op.\n\n";
+    } else if (root == "doctor") {
+      out << "Print JSON capabilities without requesting pixels or recording streams.\n\n";
+    } else if (root == "upload") {
       out << "Upload a local file and copy its HTTP(S) URL. The local file is retained.\n"
              "Runs immediately without an extra confirmation dialog; never uploads on import.\n"
              "Use --service to select a destination for this request.\n"
              "Cancel from the progress notification, recording UI or 'snipline cancel'.\n\n";
+    }
   }
   QCommandLineParser options;
-  configure(options, recordingControl || root == "cancel" || root == "quit" || root == "recent" || root == "forget" ? "control" : root,
+  configure(options, recordingControl || isTopLevelControlCommand(root) ? "control" : root,
             !child.isEmpty());
   const auto nativeHelp = options.helpText();
   out << nativeHelp.mid(nativeHelp.indexOf("Options:\n"));
@@ -234,196 +292,274 @@ int main(int argc, char **argv) {
   QCommandLineParser parser;
   configure(parser);
   QStringList arguments;
-  for (int i = 0; i < argc; ++i) arguments.append(QString::fromLocal8Bit(argv[i]));
-  if (!parser.parse(arguments)) return fail(parser.errorText());
+  for (int i = 0; i < argc; ++i) {
+    arguments.append(QString::fromLocal8Bit(argv[i]));
+  }
+  if (!parser.parse(arguments)) {
+    return fail(parser.errorText());
+  }
   const auto args = parser.positionalArguments();
   const auto root = args.value(0, "capture");
   const auto action = args.value(1);
   const bool help = parser.isSet("help") || parser.isSet("help-all") || root == "help";
   const QStringList recordControls{"pause", "resume", "stop", "discard", "status"};
   const bool recordControl = root == "record" && recordControls.contains(action);
-  const QString command = recordControl ? ((action == "pause" || action == "resume") ? "toggle" : action) : root;
-  const bool recognition = command == "qr" || command == "ocr";
+  QString command = root;
+  if (recordControl) {
+    command = action;
+    if (action == "pause" || action == "resume") {
+      command = "toggle";
+    }
+  }
+  const bool recognition = isRecognitionCommand(command);
   const bool lens = command == "lens";
   const bool uploading = command == "upload";
   const bool selecting = command == "capture" || (command == "record" && !recordControl);
-  const bool control = command == "quit" || command == "cancel" || command == "recent" || command == "forget" || recordControl;
+  const bool control = isTopLevelControlCommand(command) || recordControl;
   if (!help && !parser.isSet("version")) {
-    if (!QStringList{"capture", "record", "qr", "ocr", "lens", "upload", "daemon", "cancel", "quit", "doctor", "recent", "forget"}.contains(root))
+    if (!QStringList{"capture", "record", "qr", "ocr", "lens", "upload", "daemon", "cancel", "quit",
+                     "doctor", "recent", "forget"}
+             .contains(root)) {
       return fail("Unknown command. See 'snipline --help'.");
-    if (args.size() > 2 || ((root != "capture" && root != "record" && !recognition && !lens) && args.size() > 1))
+    }
+    if (args.size() > 2 ||
+        ((root != "capture" && root != "record" && !recognition && !lens) && args.size() > 1)) {
       return fail("Unexpected arguments. See 'snipline help " + root + "'.");
-    if (selecting && !action.isEmpty() && !QStringList{"region", "monitor", "window"}.contains(action))
+    }
+    if (selecting && !action.isEmpty() &&
+        !QStringList{"region", "monitor", "window"}.contains(action)) {
       return fail("Unknown " + root + " subcommand. See 'snipline help " + root + "'.");
-    if ((recognition || lens) && !action.isEmpty() && !QStringList{"region", "monitor", "window"}.contains(action))
+    }
+    if ((recognition || lens) && !action.isEmpty() &&
+        !QStringList{"region", "monitor", "window"}.contains(action)) {
       return fail("Image targets are region, monitor and window.");
-    if (parser.isSet("file") && ((!recognition && !lens && !uploading) || !action.isEmpty()))
+    }
+    if (parser.isSet("file") && ((!recognition && !lens && !uploading) || !action.isEmpty())) {
       return fail("--file is only valid with qr/ocr/lens/upload without a target.");
-    if (uploading && !parser.isSet("file")) return fail("Upload requires --file <path>.");
+    }
+    if (uploading && !parser.isSet("file")) {
+      return fail("Upload requires --file <path>.");
+    }
     QCommandLineParser scoped;
-    configure(scoped, control ? "control" : command,
-              !action.isEmpty());
-    if (!scoped.parse(arguments)) return fail(scoped.errorText());
+    configure(scoped, control ? "control" : command, !action.isEmpty());
+    if (!scoped.parse(arguments)) {
+      return fail(scoped.errorText());
+    }
   }
   // Parse first so command names used as option values do not affect whether
   // the process needs a graphical application.
   const bool headless = help || parser.isSet("version") || control || command == "doctor";
   std::unique_ptr<QCoreApplication> app;
-  if (headless)
+  if (headless) {
     app = std::make_unique<QCoreApplication>(argc, argv);
-  else {
+  } else {
     QQuickStyle::setStyle("Basic");
     app = std::make_unique<QApplication>(argc, argv);
     QGuiApplication::setQuitOnLastWindowClosed(false);
     QGuiApplication::setDesktopFileName("snipline");
   }
-  if (help) return showCommandHelp(args) ? 0 : fail("Unknown help command. See 'snipline --help'.");
+  if (help) {
+    return showCommandHelp(args) ? 0 : fail("Unknown help command. See 'snipline --help'.");
+  }
   if (parser.isSet("version")) {
     QTextStream(stdout) << "snipline " << QCoreApplication::applicationVersion() << '\n';
     return 0;
   }
-  if (command == "doctor")
+  if (command == "doctor") {
     return snip::doctor();
+  }
   snip::Config config;
   QString configError;
-  if (!control &&
-      !config.loadFile(parser.isSet("config") ? parser.value("config")
-                                              : snip::Config::defaultPath(),
-                       !parser.isSet("config"), &configError))
+  if (!control && !config.loadFile(parser.isSet("config") ? parser.value("config")
+                                                          : snip::Config::defaultPath(),
+                                   !parser.isSet("config"), &configError)) {
     return fail(configError);
+  }
   const QString target = args.value(1, config.target);
   const QString recognitionTarget = action.isEmpty() ? "region" : action;
-  const QString recognitionFile = parser.isSet("file") ? QFileInfo(parser.value("file")).absoluteFilePath() : QString{};
-  if (selecting && target != "region" && target != "monitor" &&
-      target != "window")
+  const QString recognitionFile =
+      parser.isSet("file") ? QFileInfo(parser.value("file")).absoluteFilePath() : QString{};
+  if (selecting && target != "region" && target != "monitor" && target != "window") {
     return fail("Capture targets are region, monitor and window.");
-  if (parser.isSet("live") && parser.isSet("frozen"))
+  }
+  if (parser.isSet("live") && parser.isSet("frozen")) {
     return fail("--live and --frozen are mutually exclusive.");
-  if (command != "capture" && !recognition && !lens && (parser.isSet("live") || parser.isSet("frozen")))
+  }
+  if (!supportsScreenshotTiming(command) && (parser.isSet("live") || parser.isSet("frozen"))) {
     return fail("--live/--frozen are only valid with capture, qr, ocr or lens.");
-  if (parser.isSet("file") && (parser.isSet("live") || parser.isSet("frozen")))
+  }
+  if (parser.isSet("file") && (parser.isSet("live") || parser.isSet("frozen"))) {
     return fail("--live/--frozen cannot be used with --file.");
-  const int recognitionLive = parser.isSet("live") ? 1 : parser.isSet("frozen") ? 0 : -1;
-  const bool live =
-      parser.isSet("live") || (!parser.isSet("frozen") && config.live);
-  const auto format = parser.isSet("format") ? parser.value("format").toLatin1()
-                                             : config.format;
-  if (format != "png" && format != "jpeg" && format != "webp")
+  }
+  const int recognitionLive = booleanOverride(parser, "live", "frozen");
+  const bool live = parser.isSet("live") || (!parser.isSet("frozen") && config.live);
+  const auto format = parser.isSet("format") ? parser.value("format").toLatin1() : config.format;
+  if (format != "png" && format != "jpeg" && format != "webp") {
     return fail("Format must be png, jpeg, or webp.");
-  if ((!selecting || command != "record") && (parser.isSet("video-format") || parser.isSet("system-audio") ||
-       parser.isSet("microphone") || parser.isSet("no-system-audio") || parser.isSet("no-microphone") ||
-       parser.isSet("codec") || parser.isSet("encoder")))
+  }
+  if ((!selecting || command != "record") &&
+      (parser.isSet("video-format") || parser.isSet("system-audio") || parser.isSet("microphone") ||
+       parser.isSet("no-system-audio") || parser.isSet("no-microphone") || parser.isSet("codec") ||
+       parser.isSet("encoder"))) {
     return fail("Recording options are only valid with record.");
+  }
   if ((parser.isSet("system-audio") && parser.isSet("no-system-audio")) ||
-      (parser.isSet("microphone") && parser.isSet("no-microphone")))
+      (parser.isSet("microphone") && parser.isSet("no-microphone"))) {
     return fail("Conflicting audio options.");
+  }
   const auto videoFormat = parser.isSet("video-format") ? parser.value("video-format") : QString{};
   const auto codec = parser.value("codec");
   const auto encoder = parser.value("encoder");
-  const int systemAudio = parser.isSet("system-audio") ? 1 : parser.isSet("no-system-audio") ? 0 : -1;
-  const int microphone = parser.isSet("microphone") ? 1 : parser.isSet("no-microphone") ? 0 : -1;
+  const int systemAudio = booleanOverride(parser, "system-audio", "no-system-audio");
+  const int microphone = booleanOverride(parser, "microphone", "no-microphone");
   auto bus = QDBusConnection::sessionBus();
-  if (!bus.isConnected())
+  if (!bus.isConnected()) {
     return fail("A session D-Bus is required for single-instance operation.");
+  }
   if (bus.interface()->isServiceRegistered(service).value()) {
-    if (parser.isSet("directory") || parser.isSet("format") ||
-        parser.isSet("theme") || parser.isSet("config") || parser.isSet("tray"))
+    if (parser.isSet("directory") || parser.isSet("format") || parser.isSet("theme") ||
+        parser.isSet("config") || parser.isSet("tray")) {
       return fail("An instance is running. Quit it before changing directory, "
                   "format, theme, config, or tray mode.");
-    if (command == "daemon")
+    }
+    if (command == "daemon") {
       return 0;
+    }
     QDBusInterface remote(service, objectPath, service, bus);
     if (command == "recent" || command == "forget") {
       const auto reply = remote.call(command == "recent" ? "Recent" : "ClearRecent");
-      if (reply.type() == QDBusMessage::ErrorMessage) return fail(reply.errorMessage());
-      if (command == "recent") QTextStream(stdout) << reply.arguments().value(0).toString() << '\n';
+      if (reply.type() == QDBusMessage::ErrorMessage) {
+        return fail(reply.errorMessage());
+      }
+      if (command == "recent") {
+        QTextStream(stdout) << reply.arguments().value(0).toString() << '\n';
+      }
       return 0;
     }
     if (uploading || lens) {
-      const QDBusReply<QString> reply = uploading
-          ? remote.call("Upload", recognitionFile, parser.value("service"))
-          : remote.call("Lens", recognitionTarget, recognitionFile, recognitionLive);
-      if (!reply.isValid()) return fail(reply.error().message());
+      const QDBusReply<QString> reply =
+          uploading ? remote.call("Upload", recognitionFile, parser.value("service"))
+                    : remote.call("Lens", recognitionTarget, recognitionFile, recognitionLive);
+      if (!reply.isValid()) {
+        return fail(reply.error().message());
+      }
       return reply.value().isEmpty() ? 0 : fail(reply.value());
     }
     if (recognition) {
-      const QDBusReply<QString> reply = remote.call("RecognizeWithMode", command, recognitionTarget, recognitionFile, recognitionLive);
-      if (!reply.isValid()) return fail(reply.error().message());
+      const QDBusReply<QString> reply = remote.call("RecognizeWithMode", command, recognitionTarget,
+                                                    recognitionFile, recognitionLive);
+      if (!reply.isValid()) {
+        return fail(reply.error().message());
+      }
       return reply.value().isEmpty() ? 0 : fail(reply.value());
     }
     if (command == "quit" || command == "cancel") {
       const auto reply = remote.call(command == "quit" ? "Quit" : "Cancel");
-      return reply.type() == QDBusMessage::ErrorMessage
-                 ? fail(reply.errorMessage())
-                 : 0;
+      return reply.type() == QDBusMessage::ErrorMessage ? fail(reply.errorMessage()) : 0;
     }
     if (command == "discard") {
       const auto reply = remote.call("Cancel");
       return reply.type() == QDBusMessage::ErrorMessage ? fail(reply.errorMessage()) : 0;
     }
     if (command == "toggle" || command == "stop" || command == "status") {
-      const QString method = command == "toggle" ? "TogglePause" : command == "stop" ? "Stop" : "Status";
+      const QString method = command == "toggle" ? "TogglePause"
+                             : command == "stop" ? "Stop"
+                                                 : "Status";
       const QDBusReply<QString> reply = remote.call(method);
-      if (!reply.isValid()) return fail(reply.error().message());
-      if (command == "status") { QTextStream(stdout) << reply.value() << '\n'; return 0; }
+      if (!reply.isValid()) {
+        return fail(reply.error().message());
+      }
+      if (command == "status") {
+        QTextStream(stdout) << reply.value() << '\n';
+        return 0;
+      }
       return reply.value().isEmpty() ? 0 : fail(reply.value());
     }
     if (command == "record") {
-      const QDBusReply<QString> reply = remote.call("RecordEncoding", args.size() > 1 ? target : QString{},
-                                                   videoFormat, systemAudio, microphone, codec, encoder);
-      if (!reply.isValid()) return fail(reply.error().message());
+      const QDBusReply<QString> reply =
+          remote.call("RecordEncoding", args.size() > 1 ? target : QString{}, videoFormat,
+                      systemAudio, microphone, codec, encoder);
+      if (!reply.isValid()) {
+        return fail(reply.error().message());
+      }
       return reply.value().isEmpty() ? 0 : fail(reply.value());
     }
-    const QDBusReply<QString> reply =
-        remote.call("CaptureWithMode", target, live);
-    if (!reply.isValid())
+    const QDBusReply<QString> reply = remote.call("CaptureWithMode", target, live);
+    if (!reply.isValid()) {
       return fail(reply.error().message());
+    }
     return reply.value().isEmpty() ? 0 : fail(reply.value());
   }
   if (control) {
-    if (command == "recent") { QTextStream(stdout) << "[]\n"; return 0; }
-    if (command == "status") { QTextStream(stdout) << "{\"recording\":false,\"state\":\"Idle\"}\n"; return 0; }
-    if (command == "toggle" || command == "stop") return fail("No running Snipline instance.");
+    if (command == "recent") {
+      QTextStream(stdout) << "[]\n";
+      return 0;
+    }
+    if (command == "status") {
+      QTextStream(stdout) << "{\"recording\":false,\"state\":\"Idle\"}\n";
+      return 0;
+    }
+    if (command == "toggle" || command == "stop") {
+      return fail("No running Snipline instance.");
+    }
     return 0;
   }
-  if (!qobject_cast<QGuiApplication *>(app.get()))
+  if (!qobject_cast<QGuiApplication *>(app.get())) {
     return fail("Capture requires a graphical session.");
+  }
 
   QString directory = parser.value("directory");
-  if (directory.isEmpty())
+  if (directory.isEmpty()) {
     directory = config.directory;
-  if (parser.isSet("directory"))
+  }
+  if (parser.isSet("directory")) {
     config.recordingDirectory = QDir(directory).absolutePath();
+  }
   snip::Controller controller(QDir(directory).absolutePath(), format,
-                              parser.isSet("theme") ? parser.value("theme")
-                                                    : config.theme);
+                              parser.isSet("theme") ? parser.value("theme") : config.theme);
   controller.configure(config);
   TerminationSignals terminationSignals(controller);
-  if (!bus.registerObject(objectPath, &controller,
-                          QDBusConnection::ExportScriptableSlots) ||
-      !bus.registerService(service))
+  if (!bus.registerObject(objectPath, &controller, QDBusConnection::ExportScriptableSlots) ||
+      !bus.registerService(service)) {
     return fail("Could not register the single-instance service. Try again.");
+  }
   std::unique_ptr<snip::DesktopIntegration> desktop;
-  if (parser.isSet("tray")) desktop = std::make_unique<snip::DesktopIntegration>(controller);
+  if (parser.isSet("tray")) {
+    desktop = std::make_unique<snip::DesktopIntegration>(controller);
+  }
   if (uploading || lens) {
     const auto service = parser.value("service");
-    QTimer::singleShot(0, &controller, [&controller, uploading, recognitionTarget, recognitionFile, recognitionLive, service] {
-      const auto error = uploading ? controller.Upload(recognitionFile, service)
-                                  : controller.Lens(recognitionTarget, recognitionFile, recognitionLive);
-      if (!error.isEmpty()) QTextStream(stderr) << error << '\n';
-    });
+    QTimer::singleShot(
+        0, &controller,
+        [&controller, uploading, recognitionTarget, recognitionFile, recognitionLive, service] {
+          const auto error =
+              uploading ? controller.Upload(recognitionFile, service)
+                        : controller.Lens(recognitionTarget, recognitionFile, recognitionLive);
+          if (!error.isEmpty()) {
+            QTextStream(stderr) << error << '\n';
+          }
+        });
   } else if (recognition) {
-    QTimer::singleShot(0, &controller, [&controller, command, recognitionTarget, recognitionFile, recognitionLive] {
-      const auto error = controller.RecognizeWithMode(command, recognitionTarget, recognitionFile, recognitionLive);
-      if (!error.isEmpty()) QTextStream(stderr) << error << '\n';
-    });
+    QTimer::singleShot(0, &controller,
+                       [&controller, command, recognitionTarget, recognitionFile, recognitionLive] {
+                         const auto error = controller.RecognizeWithMode(
+                             command, recognitionTarget, recognitionFile, recognitionLive);
+                         if (!error.isEmpty()) {
+                           QTextStream(stderr) << error << '\n';
+                         }
+                       });
   } else if (selecting) {
-    QTimer::singleShot(0, &controller, [&controller, command, target, live, videoFormat, systemAudio, microphone, codec, encoder] {
-      const auto error = command == "record" ? controller.RecordEncoding(target, videoFormat, systemAudio, microphone, codec, encoder)
-                                             : controller.CaptureWithMode(target, live);
-      if (!error.isEmpty())
-        QTextStream(stderr) << error << '\n';
-    });
+    QTimer::singleShot(
+        0, &controller,
+        [&controller, command, target, live, videoFormat, systemAudio, microphone, codec, encoder] {
+          const auto error = command == "record"
+                                 ? controller.RecordEncoding(target, videoFormat, systemAudio,
+                                                             microphone, codec, encoder)
+                                 : controller.CaptureWithMode(target, live);
+          if (!error.isEmpty()) {
+            QTextStream(stderr) << error << '\n';
+          }
+        });
   }
   return app->exec();
 }

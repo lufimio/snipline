@@ -11,23 +11,23 @@ struct Config {
   bool live = true, clipboard = true, notifications = true;
   int notificationTimeout = 5000;
   QVariantMap keybindings{{"confirm", QStringList{"Return", "Enter", "Space"}},
-                         {"cancel", QStringList{"Escape"}},
-                         {"live", QStringList{"Ctrl+L"}},
-                         {"cursor", QStringList{"Ctrl+Shift+C"}},
-                         {"save", QStringList{"Ctrl+S"}},
-                         {"copy", QStringList{"Ctrl+C"}},
-                         {"open", QStringList{"Ctrl+O"}},
-                         {"folder", QStringList{"Ctrl+Shift+O"}},
-                         {"edit", QStringList{"Ctrl+E"}},
-                         {"upload", QStringList{"Ctrl+U"}},
-                         {"capture", QStringList{"Ctrl+1"}},
-                         {"record", QStringList{"Ctrl+2"}},
-                         {"qr", QStringList{"Ctrl+3"}},
-                         {"ocr", QStringList{"Ctrl+4"}},
-                         {"lens", QStringList{"Ctrl+5"}},
-                         {"region", QStringList{"Shift+1"}},
-                         {"monitor", QStringList{"Shift+2"}},
-                         {"window", QStringList{"Shift+3"}}};
+                          {"cancel", QStringList{"Escape"}},
+                          {"live", QStringList{"Ctrl+L"}},
+                          {"cursor", QStringList{"Ctrl+Shift+C"}},
+                          {"save", QStringList{"Ctrl+S"}},
+                          {"copy", QStringList{"Ctrl+C"}},
+                          {"open", QStringList{"Ctrl+O"}},
+                          {"folder", QStringList{"Ctrl+Shift+O"}},
+                          {"edit", QStringList{"Ctrl+E"}},
+                          {"upload", QStringList{"Ctrl+U"}},
+                          {"capture", QStringList{"Ctrl+1"}},
+                          {"record", QStringList{"Ctrl+2"}},
+                          {"qr", QStringList{"Ctrl+3"}},
+                          {"ocr", QStringList{"Ctrl+4"}},
+                          {"lens", QStringList{"Ctrl+5"}},
+                          {"region", QStringList{"Shift+1"}},
+                          {"monitor", QStringList{"Shift+2"}},
+                          {"window", QStringList{"Shift+3"}}};
   QString recordingFormat = "mp4";
   QString recordingCodec = "auto", recordingEncoder = "auto";
   QString screenshotEditor, videoEditor;
@@ -45,4 +45,4 @@ struct Config {
   bool loadFile(const QString &path, bool optional, QString *error);
   static QString defaultPath();
 };
-}
+} // namespace snip

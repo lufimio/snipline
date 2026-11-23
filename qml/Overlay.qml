@@ -272,16 +272,29 @@ Item {
         }
     }
     MouseArea {
+        id: selectionMouseArea
+        objectName: "selectionMouseArea"
+        property int dragCursor: Qt.CrossCursor
         anchors.fill: parent
         enabled: root.selecting && (controller.mode === "window" ? controller.canRetarget
                  : !controller.busy && controller.error.length === 0)
         hoverEnabled: true
-        cursorShape: controller.mode === "region" ? Qt.CrossCursor : Qt.PointingHandCursor
+        cursorShape: {
+            if (controller.mode !== "region") return Qt.PointingHandCursor
+            // Read the notifying property so stationary-pointer changes also
+            // update the cursor when the selection is moved programmatically.
+            if (!selection.valid) return Qt.CrossCursor
+            if (pressed) return dragCursor
+            return selection.cursorShapeAt(outputRect.x + mouseX / root.sx,
+                                           outputRect.y + mouseY / root.sy)
+        }
         onEntered: {
             if (controller.mode === "monitor")
                 controller.selectMonitor(outputIndex)
         }
         onPressed: mouse => {
+            dragCursor = selection.cursorShapeAt(outputRect.x + mouse.x / root.sx,
+                                                  outputRect.y + mouse.y / root.sy)
             root.forceActiveFocus()
             if (controller.mode === "monitor")
                 controller.selectMonitor(outputIndex)

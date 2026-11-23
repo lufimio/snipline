@@ -156,6 +156,46 @@ class UiTest : public QObject {
         return nullptr;
     }
 private slots:
+    void selectionCursorMatchesHandlesAndEdges()
+    {
+        QTemporaryDir directory;
+        FakePixels pixels;
+        FakeWindows windows;
+        FakeBarrier barrier;
+        Controller controller(directory.path(), "png", {}, nullptr, &pixels, &windows, &barrier);
+        QVERIFY(controller.CaptureWithMode("region", true).isEmpty());
+        auto *view = selectorView();
+        QVERIFY(view);
+        auto *selection = selectionModel();
+        selection->setRect({100, 100, 200, 140});
+        auto *area = view->rootObject()->findChild<QQuickItem *>("selectionMouseArea");
+        QVERIFY(area);
+        const auto checkCursor = [&](QPoint point, Qt::CursorShape cursor) {
+            QTest::mouseMove(view, point);
+            QTRY_COMPARE(area->property("cursorShape").toInt(), int(cursor));
+        };
+        QTest::qWait(50);
+        checkCursor({100, 100}, Qt::SizeFDiagCursor);
+        checkCursor({300, 100}, Qt::SizeBDiagCursor);
+        checkCursor({100, 240}, Qt::SizeBDiagCursor);
+        checkCursor({300, 240}, Qt::SizeFDiagCursor);
+        checkCursor({100, 170}, Qt::SizeHorCursor);
+        checkCursor({200, 100}, Qt::SizeVerCursor);
+        checkCursor({200, 170}, Qt::SizeAllCursor);
+        checkCursor({30, 30}, Qt::CrossCursor);
+        checkCursor({100, 100}, Qt::SizeFDiagCursor);
+        QTest::mousePress(view, Qt::LeftButton, Qt::NoModifier, {100, 100});
+        QTest::mouseMove(view, {70, 70});
+        QCOMPARE(area->property("cursorShape").toInt(), int(Qt::SizeFDiagCursor));
+        QTest::mouseRelease(view, Qt::LeftButton, Qt::NoModifier, {70, 70});
+        QCOMPARE(selection->rect(), QRectF(70, 70, 230, 170));
+        // A stationary pointer must react when selection geometry changes.
+        selection->setRect({200, 200, 100, 100});
+        QTRY_COMPARE(area->property("cursorShape").toInt(), int(Qt::CrossCursor));
+        controller.setMode("monitor");
+        QTRY_COMPARE(area->property("cursorShape").toInt(), int(Qt::PointingHandCursor));
+        controller.cancel();
+    }
     void recentMetadataIsBoundedAndDoesNotOwnFiles()
     {
         QTemporaryDir directory;

@@ -12,13 +12,19 @@ public:
   QStringList bodies;
   QList<uint> closed;
 public slots:
+
   uint Notify(const QString &, uint, const QString &, const QString &, const QString &body,
               const QStringList &buttons, const QVariantMap &, int) {
     actions.append(buttons);
     bodies.append(body);
     return next++;
   }
-  void CloseNotification(uint id) { closed.append(id); emit NotificationClosed(id, 3); }
+
+  void CloseNotification(uint id) {
+    closed.append(id);
+    emit NotificationClosed(id, 3);
+  }
+
 signals:
   void ActionInvoked(uint id, const QString &action);
   void NotificationClosed(uint id, uint reason);
@@ -27,12 +33,14 @@ signals:
 class NotificationTest : public QObject {
   Q_OBJECT
 private slots:
+
   void actionsKeepOriginalUrlsAndRequireExplicitClick() {
     auto bus = QDBusConnection::sessionBus();
     QVERIFY(bus.isConnected());
     FakeNotifications server;
-    QVERIFY(bus.registerObject("/org/freedesktop/Notifications", &server,
-        QDBusConnection::ExportAllSlots | QDBusConnection::ExportAllSignals));
+    QVERIFY(
+        bus.registerObject("/org/freedesktop/Notifications", &server,
+                           QDBusConnection::ExportAllSlots | QDBusConnection::ExportAllSignals));
     QVERIFY(bus.registerService("org.freedesktop.Notifications"));
     const auto cleanup = qScopeGuard([&] {
       bus.unregisterService("org.freedesktop.Notifications");
@@ -91,7 +99,8 @@ private slots:
     notifications.showSaved("Recording", "Saved", 5000, "/second.mp4", "losslesscut {}", false);
     QTRY_COMPARE(server.actions.size(), 10);
     QTest::qWait(30);
-    QCOMPARE(server.actions[8], (QStringList{"open", "Open", "folder", "Open Folder", "edit", "Edit"}));
+    QCOMPARE(server.actions[8],
+             (QStringList{"open", "Open", "folder", "Open Folder", "edit", "Edit"}));
     QCOMPARE(edits.size(), 0);
     emit server.ActionInvoked(9, "edit");
     QTRY_COMPARE(edits.size(), 1);
@@ -138,7 +147,7 @@ private slots:
     QTest::qWait(30);
     QCOMPARE(edits.size(), 1);
     QSignalSpy transfers(&notifications, &snip::NotificationActions::uploadRequested);
-    notifications.showSaved("Screenshot", "Saved", 5000, "/transfer.png", {}, true, "catbox", "litterbox-1h");
+    notifications.showSaved("Screenshot", "Saved", 5000, "/transfer.png", {}, true, "catbox");
     QTRY_COMPARE(server.actions.size(), 15);
     QTest::qWait(30);
     QVERIFY(server.actions[14].contains("upload"));

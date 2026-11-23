@@ -22,6 +22,7 @@ private slots:
     void gapsAndLimits();
     void selectionDrags();
     void selectionResize();
+    void selectionCursors();
     void themesAreTransactional();
     void selectionDimmingThemeTokens();
     void exportIsUnique();
@@ -140,6 +141,32 @@ void CoreTest::selectionResize()
     model.update(180, 170);
     model.end();
     QCOMPARE(model.rect(), QRectF(10, 5, 170, 165));
+}
+
+void CoreTest::selectionCursors()
+{
+    Selection selection;
+    selection.setBounds({-400, -200, 800, 600});
+    QCOMPARE(selection.cursorShapeAt(0, 0), int(Qt::CrossCursor));
+    selection.setRect({-100, -50, 200, 100});
+    for (const auto x : {-100, 100}) {
+        QCOMPARE(selection.cursorShapeAt(x, 0), int(Qt::SizeHorCursor));
+    }
+    for (const auto y : {-50, 50}) {
+        QCOMPARE(selection.cursorShapeAt(0, y), int(Qt::SizeVerCursor));
+    }
+    QCOMPARE(selection.cursorShapeAt(-100, -50), int(Qt::SizeFDiagCursor));
+    QCOMPARE(selection.cursorShapeAt(100, 50), int(Qt::SizeFDiagCursor));
+    QCOMPARE(selection.cursorShapeAt(100, -50), int(Qt::SizeBDiagCursor));
+    QCOMPARE(selection.cursorShapeAt(-100, 50), int(Qt::SizeBDiagCursor));
+    QCOMPARE(selection.cursorShapeAt(-109, -59), int(Qt::SizeFDiagCursor));
+    QCOMPARE(selection.cursorShapeAt(0, 0), int(Qt::SizeAllCursor));
+    QCOMPARE(selection.cursorShapeAt(-111, 0), int(Qt::CrossCursor));
+    // Cursor hit-testing and the actual resize operation use the same margin.
+    selection.begin(-109, 0);
+    selection.update(-150, 0);
+    selection.end();
+    QCOMPARE(selection.rect(), QRectF(-150, -50, 250, 100));
 }
 
 void CoreTest::themesAreTransactional()
